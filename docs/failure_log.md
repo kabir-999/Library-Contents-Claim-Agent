@@ -1,0 +1,15 @@
+# Failure log
+
+## A. Development-time defects found and fixed (not real-room results)
+1. **Everything became "needs review" — group-identity bug** (`identify/matcher.py::decide`). `group_works()` was called twice, so the top candidate's own group was compared by identity against a *different* list and treated as a competing work → `ambiguous=True` always, so no book could ever reach `identified`. Caught by `test_clear_match_identified`. Fix: compute groups once and compare against that list. Lesson: confidence logic needs tests for the *positive* path, not only the guardrails.
+2. **Calibration was not transferable between frames (design flaw, caught before shipping).** First design stored one px/cm per calibration and applied it to every book. Scale depends on camera distance, so a sheet calibrated at 40 cm would mis-scale a shelf shot from 90 cm by 2×. Fix: replaced phase-correlation tracking with ORB+RANSAC homographies; calibrations are bound to a frame and carried to other frames through `H(book frame→calibration frame)` (direct match, else tracked chain with confidence ×0.7). Test: `test_measure_transfers_scale_across_frames_via_homography`.
+3. **Crash while writing evidence crops** (`pipeline/postprocess.py::save_crops`): `cache.get(path) or cv2.imread(path)` evaluates a NumPy array's truth value → `ValueError`. Caught by the stubbed end-to-end test. Fix: explicit `is None` checks.
+
+4. **Zero books on a real (non-shelf) capture** — *measured fix.* First live test (one flat book on a desk, 108 frames) produced 0 confirmed books and an all-zero claim. Cause: COCO `book` confidence was below the 0.12 threshold on most frames, so detections were isolated and no track ever reached the 2-hit confirmation. Replaying the 24 saved frames offline: **10 raw detections/frame on some frames, 0 on others at 0.12 → 10 confirmed tracks (hits 10,7,4,4,4,3,…) at 0.05**. Fix: `LCA_BOOK_CONF=0.05` (recall first; OCR + metadata verification filter false boxes). Open risk: more false boxes; not yet measured on a real shelf.
+5. **PaddleOCR never loaded (silent total failure).** PaddleOCR 3.x raises `ValueError: Unknown argument: show_log`; I only caught `TypeError`, so OCR was reported unavailable and every book would have stayed `unidentified`. Found only by running OCR on an image, not by the unit tests (which stub OCR). Fix: try 3.x then 2.x constructors, catching both. Verified on a rotated synthetic spine; real-spine accuracy still unmeasured.
+
+## B. Real-room failures (to be filled after the evaluation run)
+Record the three worst errors from `data/eval/results`: what the system output, the ground truth, root cause (trace the frame, OCR text, candidates), the fix, and the re-run delta. Candidates I expect to be worst, to check first — **hypotheses, not findings**:
+* merged spine boxes on dense shelves (COCO `book` boxes → classical splitting under-/over-splits);
+* ORB registration failing on repetitive spine texture → new segments → uncalibrated books;
+* OCR of decorative/vertical fonts → partial text → `needs_review`.
