@@ -1,51 +1,56 @@
 # Development status
 
+Last updated 2026-11-20. This file says what has and has not been verified. **No pass bar has been measured on a real room yet.**
+
 ## Verified (automated, this machine)
-* `cd backend && source .venv/bin/activate && python -m pytest` → **81 passed**: claim totals/exclusion rules, schema round-trip, calibration (A4 homography, two-point, cross-frame scale transfer), room geometry (rectangle, L-shape, ceiling/wall area), matcher anti-hallucination rules, price aggregation/filtering, guidance rules, correction grammar, tracking across a synthetic pan, storage, evaluation-scoring logic, and a **stubbed end-to-end pipeline** (detectors/OCR/APIs faked) that produces a schema-valid packet + PDF with every `frame_ref` resolving.
-* `npx tsc --noEmit` and `npx next build` pass.
-* Live smoke test: backend started, a sweep created, synthetic frames sent over the WebSocket, `stop` → packet + PDF produced via the real code path. YOLO (COCO weights) loads and runs on Apple MPS.
+* `cd backend && source .venv/bin/activate && python -m pytest` -> **81 passed** (no network, no models needed): claim totals and exclusion rules, schema round-trip, calibration (A4 homography, two-point, cross-frame scale transfer), room geometry, matcher anti-hallucination rules, price aggregation/filtering, guidance rules, correction grammar, tracking, storage, evaluation scoring, a stubbed end-to-end pipeline (schema-valid packet + PDF, every `frame_ref` resolves), keyframe selection, LLM call budget, work-key de-duplication, multi-frame consensus helpers.
+* `cd frontend && npx tsc --noEmit` passes.
+* Replays of real recorded sweeps through the real code: record -> Stop -> batch analysis -> identification -> pricing -> packet works end to end (about 18-30 s after Stop for 2-minute sweeps; stage timings in `docs/cost_latency.md`).
 
-## Live-verified (2026-11-19, real APIs, no real books)
-* Serper.dev Google Shopping (US/GB/IN) returns real rows with prices + retailer names; Groq `gpt-oss-120b` JSON call; Open Library lookup; identification of a clean OCR string -> `identified 0.95`; PaddleOCR on a rotated synthetic spine.
-* Pricing "The Remains of the Day": US new 12.35 USD / used 19.0 USD (3 listings); GB new converted from US; IN unreliable (see below).
-* Bugs found by these live runs and fixed: UK `gl` code (`uk` -> `gb`; `uk` silently returned USD results), bare `$` mislabelled as local currency, essays/study guides passing as book listings (now: title must lead the listing, essay words + Grin/Hausarbeiten blocked), ISBN queries for unverified editions returning unrelated books, single-listing prices (now need >=2).
-* Limits found: Serper `link` is a Google Shopping page, not the retailer's own page; Google Books returns 429 without `GOOGLE_BOOKS_API_KEY` (Open Library covers); Ollama not running; India book prices still unreliable (one 5,324 INR result for a ~400 INR book) -> spot-check against the links.
+## Live-verified with real services / hardware (small captures only)
+* **Services:** Serper Google Shopping (US/GB/IN), eBay Browse (production keyset; token retry), Groq text model, Groq vision model (`qwen/qwen3.8-27b`), Open Library. Google Books is skipped unless a key is set (keyless requests are rate-limited to uselessness).
+* **Models:** YOLO (COCO) and YOLO-World on Apple MPS, CLIP ViT-B/32 book gate, PaddleOCR 3.x (full and text-detector-only), Tesseract.
+* **Captures:** about 2 books by one author on a desk/office, plus items (shelf, chair, whiteboard, devices). Both books identified from tilted, partly cut-off spines after the fixes in `docs/failure_log.md` section A2.
+* **Phone:** the app opened over HTTPS on an iPhone through a phone hotspot (`scripts/phone.sh`); the camera, then the agent's voice, were confirmed working by the user; results page rendered on the phone.
+* **Pricing:** India is priced from local listings only (no FX): for example a ~INR 400-1,400 range per book; unfindable titles stay blank.
 
-## Changed since (2026-11-20)
-Record-then-analyse by default (`LCA_LIVE_PROCESSING=false`; start-screen checkbox switches live inventory on), batch frame analysis (`pipeline/batch.py`),
-CLIP book gate, Tesseract fast reader + PaddleOCR text-line discovery, vision-model scene read (budgeted), author-first catalogue filtering, `work_key` de-duplication,
-India priced from local sources only (no FX), Stop releases camera/mic. Status of the sections below is otherwise unchanged: **no pass bar has been measured**,
-no >=60-book room has been captured, no demo video/packet/ground-truth sheet exists yet.
+## Current behaviour (differs from the first version)
+* **Record + live preview (default):** every frame (~6-7/s) is stored; a light preview (~1 frame/s, from memory) fills "Found so far", lets the agent speak guidance and narration and ask *original or print?* for art; it never feeds the packet. The packet comes from the **batch analysis after Stop** (`pipeline/batch.py`), with one unique id per object. Stop releases the camera and mic. After Stop, only the final summary is spoken.
+* **Settings:** `LCA_LIVE_PREVIEW` (true), `LCA_LIVE_PROCESSING` (false), `LCA_BATCH_MAX_FRAMES` (200), `LCA_BOOK_GATE` (true), `LCA_FAST_DETECT` (true), `LCA_EDGE_PROFILE` (false). See `.env.example`.
+* **Identification:** Tesseract + PaddleOCR (zoom in/out, several sightings, consensus words), author-first catalogue filtering, `work_key` de-duplication, rescue pass, budgeted vision-model scene read (always re-verified against the catalogue).
 
-**Update:** the default run now records every frame (~6-7/s) AND shows a light live preview (~1 frame/s: on-screen inventory, spoken guidance and narration, the original-or-print question); the packet still comes only from the batch pass after Stop, and the agent speaks a final summary. The remaining blockers are physical: real capture, ground truth, demo video (see `docs/capture_and_eval_checklist.md`).
+## NOT verified - do not assume these work
+* **Accuracy on a real room: nothing measured.** No >=60-book, 2-shelving-unit room has been captured. Book count, title accuracy, spine dimensions, price accuracy, non-book recall, floor area and wall area against ground truth are all **unmeasured**; `data/eval/ground_truth.xlsx` is an empty template.
+* **Metric scale and room area never checked against a ruler or tape**: the A4-sheet, two-point and known-dimension methods and the floor-plane room ranging are only unit-tested (synthetic) and replayed on small captures. Room area needs a phone with motion sensors, camera height and >=3 marked corners; a laptop webcam gives "not available".
+* **No demo video, no real claim packet/report/evidence frames for a real room exist yet** (see `docs/capture_and_eval_checklist.md`).
+* **Live preview in a real browser sweep** was verified by replaying recorded frames through the live agent, not by a full live phone sweep with the preview on.
+* Whisper speech-to-text and barge-in on the phone were not confirmed (the user confirmed the agent's voice output only). Voice is half-duplex with barge-in, not full-duplex.
+* Smart glasses: the glasses view and the small-model profile (`LCA_EDGE_PROFILE`, one crop tested) exist; no glasses were tried, and many consumer glasses have no browser camera access.
+* Ollama is optional and not running here; Qwen-VL item descriptions therefore fall back to category-level descriptions.
+* Prices are asking prices of active listings; used value needs >=2 used listings, so it is often blank. Serper's `link` is a Google Shopping page, not always the retailer's own page.
+* Cost per sweep: the packet's estimate uses placeholder rates in `app/metrics.py`; real bills not checked.
 
-## NOT verified (do not assume these work)
-* **Accuracy on a real room: nothing measured.** No books were photographed, so detection/OCR/identification/measurement/pricing accuracy are unknown. The pass-bar table is unfilled (`docs/evaluation.md`).
-* **No real packet/PDF/evidence from a real demo exists yet** (deliverables 4–6, 7 results, 10 numbers, failure-log section B depend on it). `data/eval/ground_truth.xlsx` is an empty template you must fill by hand.
-* **Pricing returns nothing without keys**: set `EBAY_CLIENT_ID/SECRET` and/or `SERPAPI_API_KEY`. The eBay/SerpAPI/Groq/Google Books/Open Library clients were written against their documented APIs but **not exercised live**.
-* PaddleOCR install was still in progress when last checked (`/private/tmp/paddle.log`); its 3.x API handling is untested. Without it, every book stays `unidentified` (OCR evidence required).
-* Ollama is installed but not running and Qwen models are not pulled; YOLO-World needs CLIP (ultralytics may try to install it) and otherwise falls back to COCO classes (no rugs/lamps/cabinets/framed art).
-* Whisper, Kokoro, browser VAD/barge-in, phone orientation sensors, camera in a browser: not exercised.
-* Spine splitting of COCO `book` boxes on dense shelves is the largest accuracy risk.
+## Known weak spots
+Spines seen only as a thin fragment cannot be identified without guessing (by design they stay "unidentified"); dense shelves with dozens of spines in view are untested; dark or glossy spines and tilted shelves are the hardest cases; two identical copies of one title merge into one entry (by request, to avoid duplicates); wall area is gross (doors/windows not subtracted).
 
-## Pending / next steps
-1. `ollama serve`; `ollama pull qwen2.5:7b-instruct qwen2.5vl:7b`; add API keys; confirm `/api/health`.
-2. Fill `data/eval/ground_truth.xlsx` for a ≥60-book, 2-unit, ≥8-object room.
-3. Record the sweep (`docs/demo_instructions.md`), run `app.eval.evaluate`, copy honest results + 3 worst errors into `docs/failure_log.md` §B and timings into `docs/cost_latency.md`.
-4. Iterate on detection/splitting using the ground truth; consider fine-tuned spine weights via `LCA_YOLO_SPINE_WEIGHTS`.
-5. Second-country comparison: after the sweep, Packet tab → pick country → "Price the first 10…" (needs pricing keys).
-
-## Known limitations
-Half-duplex voice with barge-in (not full-duplex); used value = active asking prices; wall area is gross; room needs a phone with orientation sensors, camera height and ≥3 marked corners; homography assumes planar shelf fronts; cost-rate defaults in `app/metrics.py` are placeholders.
+## Pending / next steps (mostly physical)
+1. Capture a real room and fill `data/eval/ground_truth.xlsx` by hand BEFORE tuning (`docs/capture_and_eval_checklist.md`).
+2. Record the sweep and the one-take demo; run `python -m app.eval.evaluate ...`; copy the honest results into `docs/evaluation.md`, the three worst errors into `docs/failure_log.md` section B and the timings into `docs/cost_latency.md`.
+3. `python scripts/assemble_submission.py --sweep <sweep_id> --video <recording.mp4>` builds `submission/` (Demo Video, claim_packet.json, Claim Report.pdf, Ground Truth & Results.xlsx, Architecture.pdf, Failure Log.pdf, Evidence Frames/). `Architecture.pdf`, `Failure Log.pdf` (placeholder timings) and the empty workbook already exist.
+4. Stop tracking `data/` (`git rm -r --cached data`), make the GitHub repo private and share it, regenerate the Groq/Serper/eBay keys that were pasted into chat.
 
 ## Commands
 ```bash
 # backend (from repo root)
 cd backend && source .venv/bin/activate && uvicorn app.main:app --host 127.0.0.1 --port 8000
 # frontend (second terminal)
-cd frontend && npm run dev          # http://localhost:3000
-# tests / ground-truth template / evaluation
-cd backend && python -m pytest
-python -m app.eval.ground_truth ../data/eval/ground_truth.xlsx
+cd frontend && npm run dev                      # http://localhost:3000   (do not run `next build` at the same time)
+# phone over HTTPS (frees ports 3000/8000, prints the links to open on the phone)
+./scripts/phone.sh
+# tests
+cd backend && python -m pytest && cd ../frontend && npx tsc --noEmit
+# ground-truth template / evaluation / submission folder
+cd backend && python -m app.eval.ground_truth ../data/eval/ground_truth.xlsx
 python -m app.eval.evaluate ../data/eval/ground_truth.xlsx ../data/sweeps/<id>/exports/claim_packet.json ../data/eval/results
+cd .. && python scripts/assemble_submission.py --sweep <id> --video <recording.mp4>
 ```
