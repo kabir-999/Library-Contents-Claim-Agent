@@ -435,8 +435,13 @@ class SweepSession:
         best = {**best, "text": pooled}
         all_raw = " ".join(o["text"] for o in t.ocr_obs if o["text"])
         d = None
-        for tx in dict.fromkeys(x for x in (ident.consensus_text([o["text"] for o in t.ocr_obs]), best["text"].split(" ", 0)[0] and best["text"], pooled) if x):
-            di = await ident.identify(tx, best["conf"], use_llm=False, evidence=all_raw)    # query = clean text; scoring = every raw read
+        if t.meta.get("band") and len([o for o in t.ocr_obs if o["text"]]) >= 2:
+            d = await self._vote_identify(t)          # each read votes on its own: a neighbour's stray words are outvoted, not pooled in
+            if d is not None and d["status"] == "identified":
+                await self._accept(t, d); return
+        hi = [" ".join(l["text"] for l in o.get("lines", []) if l.get("conf", 0) >= 0.75) for o in t.ocr_obs]   # confident lines only: drops a neighbour's leftover words
+        for tx in dict.fromkeys(x for x in (ident.consensus_text([o["text"] for o in t.ocr_obs]), ident.consensus_text([h for h in hi if h]), *[h for h in hi if h][:2], best["text"].split(" ", 0)[0] and best["text"], pooled) if x):
+            di = await ident.identify(tx, best["conf"], use_llm=False, evidence=(tx if t.meta.get("band") else all_raw))    # query = clean text; scoring = every raw read
             if d is None or (di["status"] == "identified" and d["status"] != "identified") or (d["status"] != "identified" and di["confidence"] > d["confidence"]):
                 d = di
             if d["status"] == "identified":
@@ -470,7 +475,7 @@ class SweepSession:
                     continue
                 boxes = await asyncio.to_thread(fast.discover, img)
                 near = [b for b in boxes if _cover_px(b, bbox) > 0.3]
-                if near:   # union of the detector box and the text-derived spine box(es)
+                if near and not t.meta.get("band"):   # union of the detector box and the text-derived spine box(es)
                     bbox = [min([bbox[0]] + [b[0] for b in near]), min([bbox[1]] + [b[1] for b in near]),
                             max([bbox[2]] + [b[2] for b in near]), max([bbox[3]] + [b[3] for b in near])]
                 t.best_frame_id, t.best_bbox, t.best_frame_size = fid, bbox, fsize
@@ -479,13 +484,40 @@ class SweepSession:
             if not self._verified(t):
                 t.best_frame_id, t.best_bbox, t.best_frame_size = keep
 
+    async def _vote_identify(self, t) -> Optional[dict]:
+        """Identify a lying spine from up to 4 INDEPENDENT reads and let them vote on the work. A read that contains a neighbour's
+        words votes for the wrong book once; the correct reads agree with each other."""
+        from ..identify.matcher import work_key
+        seen, items = set(), []
+        for o in sorted((o for o in t.ocr_obs if o.get("text")), key=lambda o: -(o["conf"] * len(o["text"]))):
+            tx = " ".join(l["text"] for l in o.get("lines", []) if l.get("conf", 0) >= 0.7) or o["text"]
+            if len(tx) >= 6 and tx.lower() not in seen:
+                seen.add(tx.lower()); items.append((tx, o))
+            if len(items) >= 3:
+                break
+        res = await asyncio.gather(*[ident.identify(tx, o["conf"], use_llm=False, evidence=tx) for tx, o in items], return_exceptions=True)
+        votes: dict[str, dict] = {}
+        for d in res:
+            if isinstance(d, dict) and d.get("chosen") and d["status"] in ("identified", "needs_review") and d["confidence"] >= 0.6:
+                k = work_key(d["chosen"].cand.title)
+                v = votes.setdefault(k, {"w": 0.0, "n": 0, "d": d})
+                v["w"] += d["confidence"] * (1.0 if d["status"] == "identified" else 0.6); v["n"] += 1
+                if d["confidence"] > v["d"]["confidence"]:
+                    v["d"] = d
+        if not votes:
+            return None
+        v = max(votes.values(), key=lambda v: v["w"])
+        return v["d"] if (v["n"] >= 2 or v["d"]["status"] == "identified") else None
+
     async def _multiscale_reads(self, t, img) -> None:
         """Zoom out (30% context: a cut-off spine's missing part is often just outside the box) and zoom in (x1.8, sharpened)."""
         from ..identify import fast
         H, W = img.shape[:2]; x1, y1, x2, y2 = [int(v) for v in t.best_bbox]
         w, h = x2 - x1, y2 - y1
-        ctx = [max(0, x1 - int(0.3 * w)), max(0, y1 - int(0.3 * h)), min(W, x2 + int(0.3 * w)), min(H, y2 + int(0.3 * h))]
-        r2 = await asyncio.to_thread(ocr.read_spine, img, ctx, t.orientation)
+        band = bool(t.meta.get("band"))   # a band is one lying spine: no zoom-out (it would pull in the neighbouring books' text)
+        k = 0.0 if band else 0.3
+        ctx = [max(0, x1 - int(k * w)), max(0, y1 - int(k * h)), min(W, x2 + int(k * w)), min(H, y2 + int(k * h))]
+        r2 = await asyncio.to_thread(ocr.read_spine, img, ctx, t.orientation) if not band else {"text": ""}
         if r2["text"]:
             t.ocr_obs.append({"frame": t.best_frame_id, "text": r2["text"], "conf": r2["conf"], "lines": r2["lines"], "rotation": "zoom_out"})
         if fast.available():
@@ -606,6 +638,10 @@ class SweepSession:
         for t, d in small:
             t.meta.update(not_book=True, gate_ok=False, gate=0.0)
         todo = [x for x in todo if x not in small]
+        for t, d in [(t, d) for t, d in todo if d.get("stack")]:     # an aligned stack of text bands IS a stack of books: no CLIP needed
+            votes = t.meta.setdefault("gate_votes", []); votes.append(0.75)
+            t.meta.update(gate_n=len(votes), gate=0.75, gate_ok=True, not_book=False)
+        todo = [x for x in todo if not x[1].get("stack")]
         if todo:
             boxes = [d["bbox"] for _, d in todo]
             probs = await asyncio.to_thread(gate.book_probs_multiscale, img, boxes)

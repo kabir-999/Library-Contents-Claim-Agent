@@ -21,6 +21,10 @@ VOCAB = [
     "framed painting", "framed picture", "portrait", "mirror", "coffee machine", "television", "laptop",
     "computer monitor", "speaker", "vase", "sculpture", "potted plant", "clock", "globe", "window",
     "door", "curtains", "storage box", "candle", "decorative object",
+    # everyday products on shelves (the weak spot before): bottles, tubes, jars, boxes
+    "perfume bottle", "cologne bottle", "sunscreen tube", "lotion bottle", "cream jar", "cosmetics", "shampoo bottle",
+    "spray bottle", "medicine bottle", "deodorant", "skincare product", "water bottle", "mug", "bowl", "basket",
+    "handbag", "backpack", "shoes", "toy", "figurine", "kitchen appliance", "hair dryer", "headphones",
 ]
 CATEGORY = {
     "bookshelf": "bookshelf", "cabinet": "cabinet", "desk": "desk", "table": "table", "chair": "chair",
@@ -31,13 +35,19 @@ CATEGORY = {
     "potted plant": "decorative", "clock": "decorative", "globe": "decorative", "candle": "decorative",
     "decorative object": "decorative", "storage box": "decorative", "window": "fixture", "door": "fixture",
     "curtains": "fixture",
+    "perfume bottle": "personal_care", "cologne bottle": "personal_care", "sunscreen tube": "personal_care", "lotion bottle": "personal_care",
+    "cream jar": "personal_care", "cosmetics": "personal_care", "shampoo bottle": "personal_care", "spray bottle": "personal_care",
+    "medicine bottle": "personal_care", "deodorant": "personal_care", "skincare product": "personal_care",
+    "water bottle": "household_item", "mug": "household_item", "bowl": "household_item", "basket": "household_item",
+    "handbag": "luggage", "backpack": "luggage", "shoes": "clothing", "toy": "toy", "figurine": "decorative",
+    "kitchen appliance": "appliance", "hair dryer": "appliance", "headphones": "electronics",
 }
 NOT_CLAIMABLE = {"fixture"}  # structure of the room, not contents
 COCO_MAP = {
     "chair": "chair", "couch": "sofa", "bed": "furniture", "dining table": "table", "tv": "electronics",
     "laptop": "electronics", "keyboard": "electronics", "mouse": "electronics", "cell phone": "electronics",
     "remote": "electronics", "potted plant": "decorative", "vase": "decorative", "clock": "decorative",
-    "bottle": "decorative", "cup": "decorative", "teddy bear": "decorative", "microwave": "appliance",
+    "bottle": "personal_care", "cup": "decorative", "teddy bear": "decorative", "microwave": "appliance",
     "oven": "appliance", "toaster": "appliance", "refrigerator": "appliance", "suitcase": "luggage",
     "backpack": "luggage", "umbrella": "decorative",
 }
@@ -51,10 +61,10 @@ class ObjectDetector:
     def _model(self):
         def make_world():
             from ultralytics import YOLOWorld
-            m = YOLOWorld("yolov8s-worldv2.pt")
+            m = YOLOWorld(self.s.lca_world_objects)   # large model by default: far better at small products than the small one
             m.set_classes(VOCAB)
             return m
-        m = get_model("yolo_world", make_world)
+        m = get_model("yolo_world_" + self.s.lca_world_objects, make_world)
         if m is not None:
             self.mode = "yolo_world"
             return m
@@ -71,14 +81,14 @@ class ObjectDetector:
     def available(self) -> bool:
         return self._model() is not None
 
-    def detect(self, img_bgr: np.ndarray, conf: float = 0.25) -> list[dict]:
+    def detect(self, img_bgr: np.ndarray, conf: float = 0.2) -> list[dict]:
         m = self._model()
         if m is None:
             return []
         res = m.predict(img_bgr, imgsz=960, conf=conf, verbose=False, device=device())[0]
         return self._parse(img_bgr, res)
 
-    def detect_batch(self, imgs: list, conf: float = 0.25, chunk: int = 16) -> list[list[dict]]:
+    def detect_batch(self, imgs: list, conf: float = 0.2, chunk: int = 16) -> list[list[dict]]:
         m = self._model()
         if m is None:
             return [[] for _ in imgs]

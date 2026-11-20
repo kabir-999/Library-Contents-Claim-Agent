@@ -71,15 +71,32 @@ async def google_books(query: str, max_results: int = 8) -> list[BookCandidate]:
     return out
 
 
+_OL_STATE = {"fails": 0, "open_until": 0.0}
+
+
+def ol_available() -> bool:
+    import time
+    return time.time() >= _OL_STATE["open_until"]
+
+
 async def open_library(query: str, limit: int = 8) -> list[BookCandidate]:
+    import time
+    if not ol_available():            # circuit open: Open Library is down/throttling, don't wait on it
+        return []
     bump("open_library_calls")
     try:
         d = await request_json("GET", "https://openlibrary.org/search.json", params={
             "q": query, "limit": limit,
             "fields": "key,title,subtitle,author_name,publisher,first_publish_year,isbn,edition_count,language"},
-            timeout=5, retries=1)
+            timeout=6, retries=1)
     except Exception:
+        OL_FAILS[0] += 1
+        _OL_STATE["fails"] += 1
+        if _OL_STATE["fails"] >= 3:   # three failures in a row -> stop calling it for 2 minutes; Google search covers meanwhile
+            _OL_STATE["open_until"] = time.time() + 120; _OL_STATE["fails"] = 0
+            log.warning("Open Library unreachable: using Google search for catalogue lookups for 2 minutes")
         return []
+    _OL_STATE["fails"] = 0
     out = []
     for doc in d.get("docs", []) or []:
         isbns = doc.get("isbn", []) or []
@@ -94,9 +111,63 @@ async def open_library(query: str, limit: int = 8) -> list[BookCandidate]:
     return out
 
 
+_SUFFIX = re.compile(r"\s*[\|\u2013\u2014]\s*(goodreads|amazon|wikipedia|google books|barnes|penguin|harpercollins|simon|flipkart|abebooks|thriftbooks|bookshop|ebay|worldcat|storygraph|audible)[^|]*$", re.I)
+
+
+_SERPER_DONE: set = set()
+_SERPER_BUDGET = [250]   # catalogue-fallback searches per server run (each costs one Serper credit)
+
+
+async def serper_books(query: str) -> list[BookCandidate]:
+    """Catalogue fallback when Open Library is unreachable: Google results ('Title by Author' pages, the book knowledge panel).
+    These are only CANDIDATES; the matcher still requires the OCR text to support the title (and author) before accepting."""
+    from ..pricing import providers as _pv
+    s = get_settings()
+    if not _pv.serper_alive():
+        return []
+    q = re.sub(r"[^A-Za-z0-9' ]+", " ", query)                       # long noisy OCR (symbols, other alphabets) makes Serper answer 400
+    q = " ".join(w for w in q.split() if len(w) <= 18)[:110].strip()
+    if len(re.sub(r"[^A-Za-z]", "", q)) < 6 or q.lower() in _SERPER_DONE:
+        return []                                                      # hopeless or already asked: don't spend a search credit
+    if _SERPER_BUDGET[0] <= 0:
+        return []
+    _SERPER_BUDGET[0] -= 1; _SERPER_DONE.add(q.lower())
+    bump("serper_calls")
+    try:
+        d = await request_json("POST", "https://google.serper.dev/search", headers={"X-API-KEY": s.serper_api_key, "Content-Type": "application/json"},
+                               json={"q": f"{q} book"}, timeout=8, retries=0)
+    except Exception as e:
+        _pv.mark_serper_dead_if_needed(e)
+        return []
+    out, seen = [], set()
+
+    def add(title: str, author: str, url: str):
+        title = re.sub(r"\s+", " ", title).strip(" -|:")
+        if len(title) < 3 or title.lower() in seen:
+            return
+        seen.add(title.lower())
+        out.append(BookCandidate("google_search", title, [author.strip()] if author.strip() else [], "", "", "", "", url, "", [], {}))
+    kg = d.get("knowledgeGraph") or {}
+    if kg.get("title") and "book" in f"{kg.get('type', '')} {kg.get('description', '')}".lower():
+        m = re.search(r"\bby ([A-Z][^,;()]+)", f"{kg.get('type', '')} {kg.get('description', '')}")
+        add(kg["title"], (kg.get("attributes") or {}).get("Author") or (m.group(1) if m else ""), kg.get("website", ""))
+    for r in d.get("organic", []) or []:
+        t = _SUFFIX.sub("", r.get("title", ""))
+        m = re.match(r"(.+?)\s+by\s+(.+?)(?:\s*\(|\s*[\|\-\u2013:]|$)", t)
+        if m:
+            add(m.group(1), m.group(2), r.get("link", ""))
+        else:
+            m2 = re.match(r"(.+?)\s+[-\u2013]\s+([A-Z][\w.' ]{3,40})$", t)
+            add(m2.group(1) if m2 else t.split(" | ")[0], m2.group(2) if m2 else "", r.get("link", ""))
+    return out[:10]
+
+
 async def lookup(query: str) -> list[BookCandidate]:
     g, o = await asyncio.gather(google_books(query), open_library(query))
-    return g + o
+    res = g + o
+    if not res and not ol_available():            # Open Library is down: Google search stands in as the catalogue
+        res = await serper_books(query)
+    return res
 
 
 async def by_isbn(isbn: str) -> list[BookCandidate]:
@@ -106,6 +177,7 @@ async def by_isbn(isbn: str) -> list[BookCandidate]:
 
 
 _AUTHOR_CACHE: dict[str, list] = {}
+OL_FAILS = [0]   # counts failed Open Library calls so callers can tell 'no results' from 'the request failed'
 
 
 async def works_by_author(author: str, limit: int = 80) -> list[BookCandidate]:
@@ -113,5 +185,10 @@ async def works_by_author(author: str, limit: int = 80) -> list[BookCandidate]:
     against the author's real titles ('The A.B.C. Murders')."""
     k = author.lower().strip()
     if k not in _AUTHOR_CACHE:
-        _AUTHOR_CACHE[k] = await open_library(f'author:"{author}"', limit) if k else []
+        r = await open_library(f'author:"{author}"', limit) if k else []
+        if not r and k and not ol_available():
+            r = await serper_books(f"{author} books list")
+        if not r:
+            return []                       # don't cache a failed/empty fetch
+        _AUTHOR_CACHE[k] = r
     return _AUTHOR_CACHE[k]

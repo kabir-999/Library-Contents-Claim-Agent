@@ -15,11 +15,32 @@ export function unlockSpeech(): boolean {
   return unlocked;
 }
 export const speechUnlocked = () => unlocked;
+
+let lastCancel = 0;
+/** Cancel any speech and remember when (Chrome drops an utterance spoken in the same instant as a cancel()). */
+export function cancelSpeech() {
+  if (typeof speechSynthesis === "undefined") return;
+  try { speechSynthesis.cancel(); lastCancel = performance.now(); } catch { /* ignore */ }
+}
+
+/** Speak `text`. Returns false if speech is unavailable; calls onerr if the browser refuses or stays silent. */
 export function say(text: string, onend?: () => void, onerr?: () => void): boolean {
   if (typeof speechSynthesis === "undefined") return false;
-  const u = new SpeechSynthesisUtterance(text); u.rate = 1.1; u.volume = 1;
+  const synth = speechSynthesis;
+  const u = new SpeechSynthesisUtterance(text); u.rate = 1.05; u.volume = 1;
   const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; }
-  u.onend = () => onend?.(); u.onerror = () => onerr?.();
-  speechSynthesis.cancel(); speechSynthesis.speak(u);
+  let started = false, finished = false;
+  u.onstart = () => { started = true; };
+  u.onend = () => { finished = true; onend?.(); };
+  u.onerror = (e: any) => { if (e?.error === "interrupted" || e?.error === "canceled") return; finished = true; onerr?.(); };
+  const go = () => {
+    try { synth.resume(); synth.speak(u); } catch { onerr?.(); return; }
+    // keep Chrome from cutting long speech after ~15 s, and detect a silent refusal
+    const keep = setInterval(() => { if (finished) clearInterval(keep); else if (synth.speaking) { synth.pause(); synth.resume(); } }, 10000);
+    setTimeout(() => { if (!started && !finished && !synth.speaking) { clearInterval(keep); onerr?.(); } }, 2500);
+  };
+  if (synth.speaking || synth.pending) { cancelSpeech(); }
+  const wait = Math.max(0, 180 - (performance.now() - lastCancel));   // never speak right after a cancel
+  if (wait > 0) setTimeout(go, wait); else go();
   return true;
 }

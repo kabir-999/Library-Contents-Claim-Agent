@@ -14,7 +14,7 @@ from . import matcher, metadata
 
 log = logging.getLogger(__name__)
 _cache: dict[str, list[metadata.BookCandidate]] = {}
-_sem = asyncio.Semaphore(8)
+_sem = asyncio.Semaphore(5)
 
 EXTRACT_SYS = ("You are given raw OCR text read from a book spine (may be noisy, words in any order). "
                "Return JSON {\"title\": str|null, \"author\": str|null}. Use ONLY words present in the text. "
@@ -52,7 +52,14 @@ async def _lookup(q: str) -> list[metadata.BookCandidate]:
     if q in _cache:
         return _cache[q]
     async with _sem:
+        f0 = metadata.OL_FAILS[0]
         c = await metadata.lookup(q)
+        if metadata.OL_FAILS[0] > f0:           # the request FAILED (timeout/throttle): retry once, and never cache a failure as 'no results'
+            await asyncio.sleep(1.2)
+            f1 = metadata.OL_FAILS[0]
+            c = await metadata.lookup(q)
+            if metadata.OL_FAILS[0] > f1:
+                return c
     _cache[q] = c
     return c
 
@@ -61,19 +68,31 @@ NOISE = {"the", "and", "of", "a", "an", "new", "edition", "bestseller", "bestsel
          "world", "worlds", "world's", "novel", "classic", "award", "winning", "winner", "penguin", "books", "bbc", "series"}
 
 
-def query_variants(text: str, max_q: int = 6) -> list[str]:
-    """Noisy spine/cover OCR (marketing lines + title + author) returns nothing as one long AND-query.
-    Try the full text plus sliding word windows; the matcher still ranks every candidate against the full OCR."""
-    toks = [w for w in text.split() if len(re.sub(r"\W", "", w)) >= 2]
-    qs = [text]
+def query_variants(text: str, max_q: int = 9) -> list[str]:
+    """Noisy reads (marketing line + title + author, glued words, leftovers of a neighbouring book) return nothing as one long
+    AND-query. Try the full text, sliding word windows, and the individual strong words (an author's surname finds the author,
+    whose catalogue the matcher then searches). The matcher still scores every candidate against the full evidence text."""
+    t = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)          # 'SARAHJ.MAAS' / 'nologyMoney' -> separate words
+    t = re.sub(r"[._]+", " ", t)
+    toks = [w for w in t.split() if len(re.sub(r"\W", "", w)) >= 2]
     core = [w for w in toks if w.lower().strip("'.,") not in NOISE]
+    strong = [w for w in core if len(re.sub(r"[^A-Za-z]", "", w)) >= 5]
+    qs = [text]
     for seq in (toks, core):
-        for size in (4, 3):
+        for size in (4, 3, 2):
             for i in range(0, max(1, len(seq) - size + 1)):
                 q = " ".join(seq[i:i + size])
-                if q not in qs and len(q) > 8:
+                if q not in qs and len(re.sub(r"\W", "", q)) > 8:
                     qs.append(q)
-    return qs[:max_q + 2]
+    for w in list(dict.fromkeys(strong))[:5]:             # single strong words: surnames, distinctive title words
+        if w not in qs:
+            qs.append(w)
+    for w in list(dict.fromkeys(strong)):                 # a stray edge character ('IOUTLIERS', 'LADWELL' for 'GLADWELL' is handled by fuzzy scoring)
+        if len(w) >= 7 and w.isalpha() and w.isupper():
+            for v in (w[1:], w[:-1]):
+                if v not in qs:
+                    qs.append(v)
+    return qs[:max_q]
 
 
 async def _lookup_variants(text: str) -> list[metadata.BookCandidate]:
@@ -87,7 +106,7 @@ async def _lookup_variants(text: str) -> list[metadata.BookCandidate]:
     return out
 
 
-async def identify(ocr_text: str, ocr_conf: float, *, use_llm: bool = True, evidence: str = "") -> dict:
+async def identify(ocr_text: str, ocr_conf: float, *, use_llm: bool = True, evidence: str = "", exclude: frozenset = frozenset()) -> dict:
     """`ocr_text` drives the catalogue QUERY (keep it clean); `evidence` (all raw reads of this book, noisy) is what candidates
     are SCORED against, so a garbled author line still counts as an author hit."""
     s = get_settings()
@@ -109,6 +128,8 @@ async def identify(ocr_text: str, ocr_conf: float, *, use_llm: bool = True, evid
         pool = cands + more
         same = [c for c in pool if any(fuzz.token_set_ratio(a.lower(), authors[0].lower()) >= 80 for a in c.authors)]
         cands = same or pool
+    if exclude:   # one title belongs to one physical book: works already owned by another book are not candidates here
+        cands = [c for c in cands if matcher.work_key(c.title) not in exclude] or cands[:0]
     d = matcher.decide(ev, ocr_conf, cands, s.lca_id_confidence_min)
     llm_used = False
     if use_llm and d["status"] != "identified":

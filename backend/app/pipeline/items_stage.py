@@ -49,6 +49,18 @@ async def classify_item(session, t) -> Item:
                     flags.append("brand_unverified_by_ocr")
             if v.get("is_framed_artwork") and cat not in ("artwork", "portrait"):
                 cat = "artwork"
+    if not brand and crop_jpg and cat not in ("artwork", "portrait", "bookshelf", "cabinet", "table", "chair", "sofa", "desk", "rug", "mirror"):
+        try:   # read the product's own label: brand/model text is evidence, no LLM involved
+            import re as _re
+            from ..identify import fast as _fast
+            cimg = cv2.imdecode(__import__("numpy").frombuffer(crop_jpg, "uint8"), 1)
+            lines = await asyncio.to_thread(_fast.read_lines, cimg) if _fast.available() else []
+            txt = " ".join(lines) or (await asyncio.to_thread(ocr.read_spine, cimg, [0, 0, 10 ** 6, 10 ** 6], "horizontal_stack")).get("text", "")
+            words = _re.findall(r"[A-Za-z0-9'&.+-]{2,}", txt)
+            if len(" ".join(words)) >= 4:
+                brand = " ".join(words)[:60]; flags.append("brand_from_ocr"); desc = f"{desc}: {brand}"[:120]
+        except Exception:
+            pass
     user_note = t.meta.get("user_note", "")
     dims = measure_item(session, t, cat)
     item = Item(id=t.tid, category=cat, description=desc, brand_model=brand, frame_ref=t.best_frame_id,

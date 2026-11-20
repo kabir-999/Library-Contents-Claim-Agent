@@ -54,3 +54,26 @@ def test_keyframe_selection_drops_blur_and_repeats():
     keep = select_keyframes([{}] * len(preps), preps)
     assert 30 <= len(keep) < 60                     # 320 frames -> a few dozen distinct keyframes (floor 30)
     assert sum(preps[i][0].blurred for i in keep) <= 2   # a long blurry stretch keeps at most a couple of frames (gap guard)
+
+
+def test_one_title_one_physical_book(monkeypatch):
+    import asyncio
+    from app.pipeline import books_stage
+    from app.identify import service as ident
+    from app.vision.tracker import Track
+
+    def mk(tid, title, author, read):
+        t = Track(tid=tid, kind="book", segment=0, mbox=[0, 0, 1, 1]); t.hits = 5
+        t.meta["ident"] = {"status": "identified"}; t.meta["ident_fields"] = {"title": title, "author": author}
+        t.ocr_obs = [{"text": read, "conf": 0.9}]
+        return t
+    good = mk("a", "Rich Dad, Poor Dad for Teens", "Robert T. Kiyosaki", "Robert T. Kiyosaki Rich Dad Poor Dad for Teens")
+    bad = mk("b", "Rich Dad, Poor Dad", "Robert T. Kiyosaki", "SARAH J MAAS HOUSE OF FLAME")      # a different book that picked up the same title
+
+    async def stub(text, conf, **kw):
+        return {"status": "needs_review", "confidence": 0.3, "chosen": None, "alternatives": []}
+    monkeypatch.setattr(ident, "identify", stub)
+    n = asyncio.run(books_stage.resolve_conflicts(None, [good, bad]))
+    assert n == 1
+    assert good.meta["ident"]["status"] == "identified" and good.meta["ident_fields"]["title"].endswith("for Teens")
+    assert bad.meta["ident"]["status"] == "needs_review" and not bad.meta["ident_fields"]     # demoted, not left as a duplicate

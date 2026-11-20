@@ -31,7 +31,7 @@ from .session import SweepSession
 log = logging.getLogger(__name__)
 SESSIONS: dict[str, SweepSession] = {}
 PACKET_TASKS: dict[str, asyncio.Task] = {}
-SPOKEN = {"intro", "reply", "guidance", "narration"}   # the agent talks while you sweep; after Stop only the final summary is spoken
+SPOKEN = {"intro", "reply", "finish"}   # always spoken; guidance/narration/progress if LCA_SPOKEN_GUIDANCE=true; after Stop: "sweep finished" + the final summary
 WHISPER_NOISE = {"thank you", "thanks for watching", "you", "bye", "okay", "ok", "uh", "um", "hmm"}
 
 INTRO = ("Walk slowly along your shelves with the camera pointed at them. Don't pull anything out. "
@@ -74,7 +74,8 @@ class LiveAgent:
         """Queue speech. Guidance never talks over the user; replies to the user do."""
         if self.s.user_speaking and not interrupt:
             return
-        speak = kind in SPOKEN and not self.s.ended_at   # after "stop" everything is text-only; only the conversation is voiced; guidance/narration stay as on-screen text
+        from ..config import get_settings
+        speak = (kind in SPOKEN or (kind in ("guidance", "narration") and get_settings().lca_spoken_guidance)) and (not self.s.ended_at or kind == "finish")   # after "stop" everything is text-only; only the conversation is voiced; guidance/narration stay as on-screen text
         audio = await asyncio.to_thread(tts.synthesize_b64, text) if speak and tts.engine() == "kokoro" else None
         await self.send({"type": "agent_say", "text": text, "kind": kind, "speak": speak, "audio_wav_b64": audio})
 
@@ -160,6 +161,9 @@ class LiveAgent:
                 g = await (self.s.record_frame(*slot) if self.s.batch_mode else self.s.on_frame(*slot))
                 if g:
                     await self.say(g["text"], "guidance")
+                if self.s.batch_mode and not self.s.ended_at and self.s.elapsed > 12 and time.time() - getattr(self, "_progress_t", 0) >= 25:
+                    self._progress_t = time.time()     # a spoken heartbeat: the user hears the agent is alive and still capturing
+                    await self.say(f"Still recording. {int(self.s.elapsed)} seconds so far. Keep sweeping slowly and keep every spine in view.", "guidance")
                 if self.pv and not self.pv_busy and not self.s.ended_at and time.time() - self.pv_last >= 1.0:
                     self.pv_busy, self.pv_last = True, time.time()
                     asyncio.create_task(self._preview(slot))
@@ -297,5 +301,5 @@ class LiveAgent:
             self.pv._worker.cancel()
         s.store.update_sweep(s.id, state="processing", meta={"duration_s": s.elapsed})
         await self.send({"type": "sweep_ended", "duration_s": round(s.elapsed, 1)})
-        await self.say("Sweep finished. I'm now identifying and pricing everything; it takes a few minutes.", "reply", True)
+        await self.say("Sweep finished. I'm now identifying and pricing everything; it takes a couple of minutes.", "finish", True)
         PACKET_TASKS[s.id] = asyncio.create_task(postprocess.run(s))

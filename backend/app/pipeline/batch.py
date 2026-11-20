@@ -73,6 +73,7 @@ async def replay(session, progress=None) -> dict:
         gate.warm(); await asyncio.sleep(0.5)
     from ..identify import fast
     discovered = 0
+    stride = max(1, len(keep) // 24)
     tm = {"prep": round(time.time() - t0, 2), "detect": 0.0, "discover": 0.0, "track": 0.0}
     for c0 in range(0, len(keep), CHUNK):
         idx = keep[c0:c0 + CHUNK]
@@ -82,7 +83,7 @@ async def replay(session, progress=None) -> dict:
             continue
         ims = [im for _, im in ok]
         td = time.time()
-        sel = [k for k in range(len(ims)) if (c0 + k) % 2 == 0]   # large static objects: every 2nd keyframe is plenty
+        sel = list(range(len(ims)))     # small products matter now: objects are detected on every analysed frame
         bdets_all, o_sel = await asyncio.gather(asyncio.to_thread(session.detector.detect_batch, ims),
                                                 asyncio.to_thread(session.objdet.detect_batch, [ims[k] for k in sel]))
         odets_all = [[] for _ in ims]
@@ -91,12 +92,22 @@ async def replay(session, progress=None) -> dict:
         tm["detect"] += time.time() - td
         for (i, im), bd, od in zip(ok, bdets_all, odets_all):
             od = [d for d in od if d.get("label") != "book"]
-            # text-line discovery only where the box detectors found nothing confident (bounded: ~180 ms each)
-            if discovered < 16 and (c0 + ok.index((i, im))) % 3 == 0 and not any(d["conf"] >= 0.3 for d in bd) and not preps[i][0].blurred:
+            # TEXT-BAND DISCOVERY on EVERY analysed frame (PaddleOCR text detector, ~0.2 s): one band per lying spine, so each book of a
+            # stack/tower is its own detection. Detector boxes that overlap a band are dropped (they merge neighbours or cut books off).
+            if discovered < get_settings().lca_batch_discover_max and not preps[i][0].blurred:
                 discovered += 1; tx = time.time()
-                for bb in await asyncio.to_thread(fast.discover, im):
-                    if not any(_cover(bb, d["bbox"]) > 0.5 for d in bd):
-                        bd.append({"bbox": bb, "conf": 0.35, "label": "book", "orientation": orientation_of(bb), "from_text": True})
+                bands = await asyncio.to_thread(fast.discover, im)
+                Hh, Ww = im.shape[:2]
+                bands = [b for b in bands if b[0] > 6 and b[1] > 6 and b[2] < Ww - 6 and b[3] < Hh - 6]   # cut off by the frame edge = a piece of a book, not a book
+                prods = [o["bbox"] for o in od if o.get("category") in ("personal_care", "household_item") and o.get("conf", 0) >= 0.35]
+                bands = [b for b in bands if not any(_cover(b, p) > 0.6 for p in prods)]   # text on a detected bottle/jar/tube is a label, not a spine
+                if bands:
+                    bd = [d for d in bd if not any(_cover(b, d["bbox"]) > 0.4 or _cover(d["bbox"], b) > 0.6 for b in bands)]
+                    for bb in bands:
+                        h = bb[3] - bb[1]
+                        stack = any(o is not bb and min(bb[2], o[2]) - max(bb[0], o[0]) >= 0.5 * min(bb[2] - bb[0], o[2] - o[0])
+                                    and max(bb[1], o[1]) - min(bb[3], o[3]) <= max(h, o[3] - o[1]) for o in bands)
+                        bd.append({"bbox": bb, "conf": 0.5, "label": "book", "orientation": orientation_of(bb), "from_text": True, "stack": stack})
                 tm["discover"] += time.time() - tx
             r = rows[i]; tt = time.time()
             await session.replay_frame(r["id"], im, r["ts"], r["orient"], preps[i][0], bd, od)

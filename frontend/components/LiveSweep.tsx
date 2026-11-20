@@ -4,7 +4,7 @@ import { WS } from "@/lib/api";
 import { fromEvent, Orient } from "@/lib/orientation";
 import { pcmToB64, startVad } from "@/lib/vad";
 import { deviceProfile, EdgeFilter } from "@/lib/edge";
-import { say as speakText, unlockSpeech } from "@/lib/voice";
+import { say as speakText, unlockSpeech, cancelSpeech } from "@/lib/voice";
 import type { FeedEntry, LiveState } from "@/lib/types";
 import type { StartResult } from "./StartClaim";
 
@@ -58,12 +58,12 @@ export default function LiveSweep({ start, onEnded }: { start: StartResult; onEn
   }, [start.stream]);
 
   const stopSpeech = useCallback(() => {
-    window.speechSynthesis?.cancel(); audioEl.current?.pause(); agentSpeaking.current = false; setAgent(a => (a === "speaking" ? "listening" : a));
+    cancelSpeech(); audioEl.current?.pause(); agentSpeaking.current = false; setAgent(a => (a === "speaking" ? "listening" : a));
   }, []);
 
   const speak = useCallback((m: any) => {
     if (muted.current || m.speak === false) return;
-    if (afterStop.current && !m.final) return;          // after Stop only the final summary is spoken
+    if (afterStop.current && !m.final && m.kind !== "finish") return;   // after Stop: only "sweep finished" and the final summary
     stopSpeech(); agentSpeaking.current = true; setAgent("speaking");
     const done = () => { agentSpeaking.current = false; setAgent(a => (a === "speaking" ? "listening" : a)); };
     if (m.audio_wav_b64) { const a = new Audio("data:audio/wav;base64," + m.audio_wav_b64); audioEl.current = a; a.onended = done; a.onerror = done; a.play().catch(done); }
@@ -138,16 +138,21 @@ export default function LiveSweep({ start, onEnded }: { start: StartResult; onEn
       setCamLost(false);
     } catch { setCamLost(true); }
   }, [start.stream]);
-  useEffect(() => {   // phones can pause the preview (audio session changes, app switch): bring it back automatically
+  useEffect(() => {   // phones can pause/black out the preview (audio-session changes, app switch, power saving): recover by itself
+    let bad = 0, lastT = -1, still = 0;
     const id = setInterval(() => {
       if (!capturing.current) return;
       const v = video.current, tr = start.stream.getVideoTracks()[0];
-      if (!tr || tr.readyState === "ended") { setCamLost(true); return; }
+      if (!tr || tr.readyState === "ended") { setCamLost(true); restartCamera(); return; }
       if (v && v.paused) v.play().catch(() => {});
-      setCamLost(false);
+      // frozen picture: currentTime not advancing while the track claims to be live
+      if (v) { if (Math.abs(v.currentTime - lastT) < 0.01) still++; else still = 0; lastT = v.currentTime; }
+      bad = (tr.muted || still >= 3) ? bad + 1 : 0;
+      if (bad >= 2) { bad = 0; still = 0; restartCamera(); }          // ~3 s of black/frozen video -> re-open the camera
+      else if (!tr.muted && still < 3) setCamLost(false);
     }, 1500);
     return () => clearInterval(id);
-  }, [start.stream]);
+  }, [start.stream, restartCamera]);
   useEffect(() => { muted.current = mute; if (mute) stopSpeech(); }, [mute, stopSpeech]);
   const mm = String(Math.floor(elapsed / 60)).padStart(2, "0"), ss = String(elapsed % 60).padStart(2, "0");
   const room = state?.room;

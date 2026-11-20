@@ -22,7 +22,8 @@ from .config import get_settings
 from .llm.providers import router
 from .pipeline import postprocess
 from .pipeline.second_country import compare
-from .pricing import book_pricing, providers
+from .pricing import book_pricing
+from .pricing import providers as providers_mod, providers
 from .pricing.markets import MARKETS, market
 from .schemas import ClaimPacket
 from .storage import storage
@@ -37,6 +38,8 @@ app = FastAPI(title="Library Contents Claim Agent")
 async def _warm_models():
     from .vision import gate
     gate.warm()   # background: book/not-book classifier; the live loop never waits for it
+    if get_settings().serper_api_key:
+        asyncio.create_task(providers_mod.serper_shopping("book", "US", 1))   # one credit: tells us at start-up whether Serper still has credits
 
 
 @app.exception_handler(ValueError)
@@ -67,7 +70,7 @@ def _packet(sweep_id: str) -> ClaimPacket:
 @app.get("/api/health")
 async def health():
     return {"ok": True, "models": models.status(), "llm": {"groq_configured": router().groq_ok, "local_provider": s.lca_local_llm_provider,
-            "local_model": s.lca_local_llm_model}, "pricing_sources": book_pricing.available_sources(), "tts": tts.engine(),
+            "local_model": s.lca_local_llm_model}, "pricing_sources": {**book_pricing.available_sources(), "serper_status": ("out_of_credits" if providers_mod.SERPER_DEAD["reason"] else ("ok" if get_settings().serper_api_key else "no_key"))}, "tts": tts.engine(),
             "ocr_enabled": s.lca_ocr_enabled, "markets": {k: v["name"] for k, v in MARKETS.items()}}
 
 

@@ -112,6 +112,8 @@ class Tracker:
             if label:
                 t.label_votes[label] = t.label_votes.get(label, 0) + 1
                 t.label = max(t.label_votes, key=t.label_votes.get)
+            if d.get("from_text"):
+                t.meta["band"] = True        # one lying spine found from its text line: reads must never include neighbours
             if sig is not None:
                 t.sig = sig; t.meta["closeup"] = True
             t.conf = max(t.conf, d.get("conf", 0.0))

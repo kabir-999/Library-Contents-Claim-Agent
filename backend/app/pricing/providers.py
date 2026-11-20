@@ -49,9 +49,24 @@ def ebay_enabled() -> bool:
     return bool(s.ebay_client_id and s.ebay_client_secret)
 
 
+SERPER_DEAD = {"reason": ""}   # set when Serper answers 'Not enough credits': stop calling it (each failed call is just noise)
+
+
+def serper_alive() -> bool:
+    return bool(get_settings().serper_api_key) and not SERPER_DEAD["reason"]
+
+
+def mark_serper_dead_if_needed(e: Exception) -> None:
+    txt = str(getattr(getattr(e, "response", None), "text", "") or e)
+    if "Not enough credits" in txt and not SERPER_DEAD["reason"]:
+        SERPER_DEAD["reason"] = "out_of_credits"
+        log.warning("SERPER IS OUT OF CREDITS: prices/lookups that depend on Google Shopping are disabled until you add credits "
+                    "or a new SERPER_API_KEY (https://serper.dev). eBay-based prices still work.")
+
+
 def serp_enabled() -> bool:
     s = get_settings()
-    return bool(s.serper_api_key or s.serpapi_api_key)
+    return serper_alive() or bool(s.serpapi_api_key)
 
 
 async def ebay_search(query: str, country: str, condition: str = "NEW", category: Optional[str] = None, limit: int = 30) -> list[dict]:
@@ -153,14 +168,15 @@ def _shopping_rows(items: list[dict], mk: dict, label: str) -> list[dict]:
 async def serper_shopping(query: str, country: str, limit: int = 20) -> list[dict]:
     """Google Shopping via Serper.dev (free tier: 2,500 searches, no card)."""
     s = get_settings()
-    if not s.serper_api_key:
+    if not serper_alive():
         return []
     mk = market(country)
     bump("serper_calls")
     try:
         d = await request_json("POST", "https://google.serper.dev/shopping", headers={"X-API-KEY": s.serper_api_key, "Content-Type": "application/json"},
-                               json={"q": query, "gl": mk["gl"], "num": limit})
-    except Exception:
+                               json={"q": query, "gl": mk["gl"], "num": limit}, retries=0)
+    except Exception as e:
+        mark_serper_dead_if_needed(e)
         return []
     return _shopping_rows(d.get("shopping", []), mk, "Google Shopping")
 

@@ -117,7 +117,8 @@ async def _price_book(*, title: str, author: str, isbn: str, group_isbns: list[t
         return [l for l in ls if l["currency"] == expect_cur], ls
 
     mk = market(country)
-    allow_foreign_fallback = allow_foreign_fallback and not mk.get("no_fx")   # India: no USD->INR conversion, ever
+    ebay_last_resort = bool(allow_foreign_fallback and mk.get("no_fx"))   # India: local first; converted eBay price ONLY if nothing local exists
+    allow_foreign_fallback = allow_foreign_fallback and not mk.get("no_fx")   # no cross-market sanity check / generic conversion there
     cross = allow_foreign_fallback and mk["code"] != home_market
     hm0 = market(home_market)
     # all lookups in parallel: latency = the slowest one, not their sum
@@ -151,6 +152,29 @@ async def _price_book(*, title: str, author: str, isbn: str, group_isbns: list[t
                                       retrieved_at=now(), converted=True, currency=currency, condition_assumed="new",
                                       original_amount=c["amount"], original_currency=hm["currency"], fx_rate=conv["rate"],
                                       fx_source=conv["source"] + (f" {conv['rate_date']}" if conv["rate_date"] else ""))
+    async def ebay_converted(cond: str):
+        """No local (Serper/Google Shopping) price: look at eBay's US, then UK, marketplace and convert with the ECB rate."""
+        if not providers.ebay_enabled():
+            return None
+        for code in ("US", "GB"):
+            hm = market(code)
+            ls = [l for l in filter_book_listings(await _ebay_listings(query, code, cond), title, priced_isbn, author) if l["currency"] == hm["currency"]]
+            cc = central(ls)
+            if cc and cc["n"] >= s.lca_min_listings:
+                conv = await fx.convert(cc["amount"], hm["currency"], currency)
+                if conv:
+                    return cc, conv, hm
+        return None
+
+    if rep.amount is None and ebay_last_resort:
+        r = await ebay_converted("NEW")
+        if r:
+            cc, conv, hm = r; l = cc["listing"]
+            rep = ReplacementCost(amount=conv["amount"], source=f"{l['source']} ({hm['code']} marketplace, converted via {conv['source']})", url=l["url"],
+                                  retrieved_at=now(), converted=True, currency=currency, condition_assumed="new",
+                                  original_amount=cc["amount"], original_currency=hm["currency"], fx_rate=conv["rate"],
+                                  fx_source=conv["source"] + (f" {conv['rate_date']}" if conv["rate_date"] else ""))
+            note += f" No local price found; converted from eBay {hm['code']} ({cc['amount']:g} {hm['currency']})."
     cu = central(used_local)
     if cu and rep.amount and cu["amount"] > 3 * rep.amount:
         note += f" Used price {cu['amount']:g} {currency} withheld: >3x the new price ({rep.amount:g}); likely a collectible/different edition."
@@ -164,6 +188,16 @@ async def _price_book(*, title: str, author: str, isbn: str, group_isbns: list[t
                          condition_assumed="Used (good/acceptable): median of active used listings",
                          currency=currency, listings_used=cu["n"])
         pass
+    if used.amount is None and ebay_last_resort:
+        r = await ebay_converted("USED")
+        if r:
+            cc, conv, hm = r; l = cc["listing"]
+            if not (rep.amount and conv["amount"] > 3 * rep.amount):            # same collectible guard as the local path
+                used = UsedValue(amount=conv["amount"], source=f"{l['source']} ({hm['code']} marketplace, converted via {conv['source']})", url=l["url"],
+                                 retrieved_at=now(), condition_assumed="Used (good/acceptable): median of active used listings",
+                                 currency=currency, converted=True, original_amount=cc["amount"], original_currency=hm["currency"],
+                                 fx_rate=conv["rate"], listings_used=cc["n"])
+                note += f" Used value converted from eBay {hm['code']} ({cc['amount']:g} {hm['currency']})."
     # Unusually valuable => human appraisal, never auto-priced
     thr = s.lca_appraisal_price_threshold   # configured in USD; compare in the claim currency
     if currency != "USD":

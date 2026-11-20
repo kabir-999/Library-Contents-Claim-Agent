@@ -27,11 +27,14 @@ class Settings(BaseSettings):
     lca_groq_vlm_model: str = "qwen/qwen3.8-27b"
 
     lca_yolo_object_weights: str = "yolov8s.pt"
+    lca_world_objects: str = "yolov8l-worldv2.pt"   # open-vocabulary object detector (large); set yolov8s-worldv2.pt for speed
     lca_yolo_spine_weights: str = ""
     lca_ocr_enabled: bool = True
     lca_live_processing: bool = False  # False (default): record during the sweep, process ALL frames in batch after Stop
+    lca_batch_discover_max: int = 150  # frames that get the text-band pass (~0.2 s each); one band = one book in a stack
     lca_batch_max_frames: int = 200   # analysed frames per sweep (evenly thinned beyond this); raise on faster hardware
-    lca_live_preview: bool = True    # while recording: ~1 frame/s light analysis for on-screen inventory + spoken guidance (final packet still comes from the batch pass)
+    lca_spoken_guidance: bool = True   # the agent speaks guidance + progress while you record (the browser has a camera watchdog); false = text only
+    lca_live_preview: bool = False    # while recording: ~1 frame/s light analysis for on-screen inventory + spoken guidance (final packet still comes from the batch pass)
     lca_edge_profile: bool = False  # small-model profile for low-power hosts: YOLOv8-nano + PaddleOCR mobile det/rec
     lca_fast_detect: bool = True  # live: one full-frame pass only (tiles + open-vocab pass are for offline/recall)
     lca_book_gate: bool = True    # CLIP book/not-book gate (disable only in stubbed tests)

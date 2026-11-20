@@ -20,16 +20,85 @@ log = logging.getLogger(__name__)
 async def finish_identification(session, tracks: list[Track], deadline: float) -> None:
     """Run OCR/identify on tracks the live worker has not reached (post-sweep, bounded by deadline)."""
     import time
-    todo = [t for t in tracks if not t.ocr_obs and not t.meta.get("excluded")]
-    for t in todo:
+    todo = [t for t in tracks if not t.ocr_obs and not t.meta.get("excluded") and not t.removed]
+    sem = asyncio.Semaphore(4)
+
+    async def one(t):
         if time.time() > deadline:
             t.meta["ident_timeout"] = True
+            return
+        async with sem:
+            try:
+                await asyncio.wait_for(session.process_track(t.tid), timeout=45)   # one slow book cannot hold up the rest
+            except asyncio.TimeoutError:
+                t.meta["ident_timeout"] = True
+            except Exception:
+                log.exception("identification failed for %s; left unidentified", t.tid)
+                t.meta["ident_error"] = True
+    await asyncio.gather(*(one(t) for t in todo))
+
+async def resolve_conflicts(session, tracks: list[Track]) -> int:
+    """ONE title = ONE physical book. When several tracks claim the same (or a prefix-related) work, the track whose OWN reads
+    support the title best keeps it; the others are re-read with that work excluded, and left unidentified if nothing else fits."""
+    from rapidfuzz import fuzz
+    from ..identify import service as ident
+    from ..identify.matcher import norm, work_key
+    live = [t for t in tracks if not t.removed and (t.meta.get("ident") or {}).get("status") == "identified"]
+    key = lambda t: work_key((t.meta.get("ident_fields") or {}).get("title", ""))
+    related = lambda a, b: a == b or (min(len(a), len(b)) >= 8 and (a.startswith(b) or b.startswith(a)))
+
+    def support(t: Track) -> float:
+        f = t.meta.get("ident_fields") or {}
+        title, sur = norm(f.get("title", "")), [w for w in norm(f.get("author", "")).split() if len(w) > 3][-1:]
+        best = 0.0
+        for o in t.ocr_obs:
+            tx = norm(o.get("text", ""))
+            if tx:
+                best = max(best, fuzz.partial_ratio(title, tx) + (15 if sur and sur[0] in tx else 0))
+        return best + len(title) * 0.01          # tie-break toward the more specific title
+
+    groups: list[list[Track]] = []
+    for t in live:
+        for g in groups:
+            if any(related(key(t), key(m)) for m in g):
+                g.append(t); break
+        else:
+            groups.append([t])
+    fixed = 0
+    for g in groups:
+        if len(g) < 2:
             continue
-        try:
-            await session.process_track(t.tid)
-        except Exception:
-            log.exception("identification failed for %s; left unidentified", t.tid)
-            t.meta["ident_error"] = True
+        owner = max(g, key=support)
+        claimed = {key(t) for t in live if t not in g} | {key(owner)}
+        for t in g:
+            if t is owner:
+                continue
+            fixed += 1
+            texts = [o["text"] for o in sorted(t.ocr_obs, key=lambda o: -(o["conf"] * len(o["text"]))) if o.get("text")][:3]
+            new = None
+            for tx in texts:
+                d = await ident.identify(tx, 0.7, use_llm=False, evidence=tx, exclude=frozenset(claimed | {key(t)}))
+                if d["status"] == "identified" and d.get("chosen") and work_key(d["chosen"].cand.title) not in claimed:
+                    new = d; break
+            if new is not None:
+                t.meta["ident"] = {k: v for k, v in new.items() if k not in ("chosen", "group", "runner_group")}
+                t.meta["ident_fields"] = ident.apply_to_book_fields(new); t.meta["reassigned"] = True
+                claimed.add(work_key(new["chosen"].cand.title))
+            else:
+                t.meta["ident"] = {"status": "needs_review", "confidence": 0.0}; t.meta["ident_fields"] = {}; t.meta["conflict_demoted"] = True
+    # Second chance for lying spines still unidentified: their reads often split the clues (title in one read, author in another).
+    # Pool the book's OWN reads, but never allow a work another book already owns, so a neighbour's words cannot win.
+    claimed = {key(t) for t in tracks if not t.removed and (t.meta.get("ident") or {}).get("status") == "identified"}
+    for t in tracks:
+        if t.removed or not t.meta.get("band") or (t.meta.get("ident") or {}).get("status") == "identified" or t.hits < 3 or len(t.ocr_obs) < 2:
+            continue
+        reads = [o["text"] for o in t.ocr_obs if o.get("text")]
+        d = await ident.identify(ident.consensus_text(reads) or reads[0], 0.7, use_llm=False, evidence=" ".join(reads), exclude=frozenset(claimed))
+        if d["status"] == "identified" and d.get("chosen"):
+            t.meta["ident"] = {k: v for k, v in d.items() if k not in ("chosen", "group", "runner_group")}
+            t.meta["ident_fields"] = ident.apply_to_book_fields(d); t.meta["pooled_second_chance"] = True
+            claimed.add(work_key(d["chosen"].cand.title)); fixed += 1
+    return fixed
 
 
 async def scene_pass(session, tracks: list[Track], deadline: float) -> int:
@@ -78,6 +147,62 @@ def _is_fragment(t: Track, ident: list) -> bool:
     return False
 
 
+PRODUCT_WORDS = {"lotion", "serum", "cream", "parfum", "perfume", "shampoo", "conditioner", "spf", "sunscreen", "moisturizer", "moisturiser", "deodorant",
+                 "soap", "toner", "cleanser", "ingredients", "tablets", "capsules", "ml", "floz", "protection", "nourishing", "nourish", "sanitizer", "toothpaste", "mascara"}
+
+
+def _is_product_label(t: Track) -> bool:
+    import re
+    words = set(re.findall(r"[a-z]{2,}", " ".join(o.get("text", "") for o in t.ocr_obs).lower().replace("fl oz", "floz")))
+    prefix_hit = any(len(w) >= 6 and any(pw.startswith(w) or w.startswith(pw) for pw in PRODUCT_WORDS if len(pw) >= 6) for w in words)   # 'protectio' (cut off) still counts
+    return (len(words & PRODUCT_WORDS) >= 1 or prefix_hit) and (t.meta.get("ident") or {}).get("status") != "identified"
+
+
+def move_products_to_items(session, tracks: list[Track]) -> list[Track]:
+    """Something that reads like a product label (lotion, serum, parfum, SPF...) is NOT a book: it leaves the Books list and becomes an
+    item (personal care), so it is classified and priced like the other contents."""
+    from copy import copy
+    moved = []
+    for t in tracks:
+        if t.removed or not _is_product_label(t) or not t.best_bbox:
+            continue
+        session.objs._n += 1
+        it = copy(t); it.tid = f"item_{session.objs._n:04d}"; it.kind = "item"; it.label = "skincare product"
+        it.meta = {"cat": "personal_care", "moved_from_books": t.tid}
+        it.ocr_obs = []; it.flags = set(t.flags)
+        session.objs.tracks[it.tid] = it
+        t.removed = True; t.meta["moved_to_items"] = it.tid
+        moved.append(it)
+    return moved
+
+
+def drop_containers(tracks: list[Track]) -> int:
+    """A tracker box that covers a whole tower reads several books at once. If its reads contain the titles of >=2 OTHER identified
+    books, it is a container: those books are already tracked individually, so the container is dropped (never listed as a book)."""
+    from rapidfuzz import fuzz
+    from ..identify.matcher import norm
+    ident = [t for t in tracks if not t.removed and (t.meta.get("ident") or {}).get("status") == "identified"]
+    n = 0
+    for t in tracks:
+        if t.removed or t.meta.get("band") or not t.ocr_obs:
+            continue
+        blob = norm(" ".join(o.get("text", "") for o in t.ocr_obs))
+        hits = [o for o in ident if o is not t and o.meta.get("band") and
+                len(norm((o.meta.get("ident_fields") or {}).get("title", ""))) >= 6 and
+                fuzz.partial_ratio(norm((o.meta.get("ident_fields") or {}).get("title", "")), blob) >= 88]
+        if len(hits) >= 2:
+            t.removed = True; t.meta["container"] = True; n += 1
+    return n
+
+
+def _only_junk(t: Track) -> bool:
+    """Unresolved track whose reads contain no real word (e.g. 'R', '2', 'P'): nothing to identify, nothing worth listing."""
+    import re
+    if (t.meta.get("ident") or {}).get("status") == "identified":
+        return False
+    return bool(t.ocr_obs) and not any(len(w) >= 3 for o in t.ocr_obs for w in re.findall(r"[A-Za-z]+", o.get("text", "")))
+
+
 def clean_books(tracks: list[Track]) -> int:
     """Final de-duplication so one physical book is one entry: same verified title -> one entry; unreadable
     fragments that sit on an identified book, or never produced any text with little evidence, are dropped."""
@@ -100,9 +225,9 @@ def clean_books(tracks: list[Track]) -> int:
             continue
         if any(t.segment == k.segment and _cover(t.mbox, k.mbox) > 0.5 for k in ident):
             t.removed = True; n += 1
-        elif _is_fragment(t, ident):
+        elif _is_fragment(t, ident) or _is_product_label(t):
             t.removed = True; n += 1
-        elif (not _has_text(t) and t.hits < 3) or (t.hits < 3 and t.conf < 0.2):
+        elif (not _has_text(t) and t.hits < 3) or (t.hits < 3 and t.conf < 0.2) or _only_junk(t):
             t.removed = True; n += 1
     return n
 

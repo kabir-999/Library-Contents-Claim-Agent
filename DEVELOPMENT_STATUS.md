@@ -15,8 +15,8 @@ Last updated 2026-11-20. This file says what has and has not been verified. **No
 * **Pricing:** India is priced from local listings only (no FX): for example a ~INR 400-1,400 range per book; unfindable titles stay blank.
 
 ## Current behaviour (differs from the first version)
-* **Record + live preview (default):** every frame (~6-7/s) is stored; a light preview (~1 frame/s, from memory) fills "Found so far", lets the agent speak guidance and narration and ask *original or print?* for art; it never feeds the packet. The packet comes from the **batch analysis after Stop** (`pipeline/batch.py`), with one unique id per object. Stop releases the camera and mic. After Stop, only the final summary is spoken.
-* **Settings:** `LCA_LIVE_PREVIEW` (true), `LCA_LIVE_PROCESSING` (false), `LCA_BATCH_MAX_FRAMES` (200), `LCA_BOOK_GATE` (true), `LCA_FAST_DETECT` (true), `LCA_EDGE_PROFILE` (false). See `.env.example`.
+* **Record (default), live preview OFF:** every frame (~6-7/s) is stored; the agent is silent while recording (speech can black out a phone camera). `LCA_LIVE_PREVIEW=true` adds a light preview (~1 frame/s: "Found so far", the *original or print?* question) and `LCA_SPOKEN_GUIDANCE=true` speaks guidance/narration; the preview never feeds the packet. The packet comes from the **batch analysis after Stop** (`pipeline/batch.py`), with one unique id per object. Stop releases the camera and mic. After Stop, only the final summary is spoken.
+* **Settings:** `LCA_LIVE_PREVIEW` (false), `LCA_SPOKEN_GUIDANCE` (false), `LCA_LIVE_PROCESSING` (false), `LCA_BATCH_MAX_FRAMES` (200), `LCA_BOOK_GATE` (true), `LCA_FAST_DETECT` (true), `LCA_EDGE_PROFILE` (false). See `.env.example`.
 * **Identification:** Tesseract + PaddleOCR (zoom in/out, several sightings, consensus words), author-first catalogue filtering, `work_key` de-duplication, rescue pass, budgeted vision-model scene read (always re-verified against the catalogue).
 
 ## NOT verified - do not assume these work

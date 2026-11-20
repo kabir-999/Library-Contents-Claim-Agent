@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, money } from "@/lib/api";
 import type { Packet } from "@/lib/types";
 
@@ -12,6 +12,8 @@ export default function Results({ p, onNew }: { p: Packet; onNew: () => void }) 
   const [c2, setC2] = useState("GB");
   const [cmp, setCmp] = useState<any>(p.second_country_pricing);
   const [busy, setBusy] = useState(false);
+  const [zoom, setZoom] = useState<{ crop: string; frame: string; label: string; full: boolean } | null>(null);
+  useEffect(() => { const f = (e: KeyboardEvent) => e.key === "Escape" && setZoom(null); window.addEventListener("keydown", f); return () => window.removeEventListener("keydown", f); }, []);
   const runCmp = async () => { setBusy(true); try { setCmp(await api.secondCountry(sid, c2, 10)); } finally { setBusy(false); } };
   return (
     <div className="mx-auto max-w-4xl space-y-5">
@@ -39,7 +41,7 @@ export default function Results({ p, onNew }: { p: Packet; onNew: () => void }) 
         <table className="w-full text-sm"><thead><tr><th></th><th>Title</th><th>Replacement</th><th>Used</th></tr></thead>
           <tbody>{p.books.map(b => (
             <tr key={b.id} className="border-t border-slate-100 dark:border-slate-800">
-              <td><img src={api.cropUrl(sid, b.id)} alt="" className="h-14 w-10 rounded object-cover" onError={e => ((e.target as HTMLImageElement).style.display = "none")} /></td>
+              <td><img src={api.cropUrl(sid, b.id)} alt="" title="Click to enlarge" onClick={() => setZoom({ crop: api.cropUrl(sid, b.id), frame: api.frameUrl(b.frame_ref), label: b.title || "Unidentified book", full: false })} className="h-14 w-10 cursor-zoom-in rounded object-cover transition hover:ring-2 hover:ring-sky-400" onError={e => ((e.target as HTMLImageElement).style.display = "none")} /></td>
               <td><div className="font-medium">{b.title || <span className="italic text-slate-400">Could not identify</span>}</div>
                 {b.author && <div className="text-xs text-slate-500">{b.author}</div>}
                 {b.status === "needs_appraisal" && <div className="text-xs text-violet-600">needs appraisal</div>}</td>
@@ -53,7 +55,7 @@ export default function Results({ p, onNew }: { p: Packet; onNew: () => void }) 
         <table className="w-full text-sm"><thead><tr><th></th><th>Item</th><th>Replacement range</th></tr></thead>
           <tbody>{p.items.map(i => (
             <tr key={i.id} className="border-t border-slate-100 dark:border-slate-800">
-              <td><img src={api.cropUrl(sid, i.id)} alt="" className="h-12 w-12 rounded object-cover" onError={e => ((e.target as HTMLImageElement).style.display = "none")} /></td>
+              <td><img src={api.cropUrl(sid, i.id)} alt="" title="Click to enlarge" onClick={() => setZoom({ crop: api.cropUrl(sid, i.id), frame: api.frameUrl(i.frame_ref), label: i.category, full: false })} className="h-12 w-12 cursor-zoom-in rounded object-cover transition hover:ring-2 hover:ring-sky-400" onError={e => ((e.target as HTMLImageElement).style.display = "none")} /></td>
               <td className="font-medium">{i.category}</td>
               <td>{i.replacement_cost.low != null ? <>{money(i.replacement_cost.low, cur)} – {money(i.replacement_cost.high, cur)}
                 {i.replacement_cost.url && <a className="ml-2 text-xs text-sky-600 underline" href={i.replacement_cost.url} target="_blank" rel="noreferrer">source</a>}</>
@@ -76,6 +78,17 @@ export default function Results({ p, onNew }: { p: Packet; onNew: () => void }) 
         <summary className="cursor-pointer font-semibold">Needs your review ({open.length})</summary>
         <ul className="mt-2 space-y-1">{open.map((q, i) => <li key={i}><span className="font-mono text-xs text-slate-500">{q.ref_id}</span> {q.reason}</li>)}</ul>
       </details>}
+
+      {zoom && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setZoom(null)}>
+        <div className="max-h-full max-w-4xl rounded-xl bg-white p-3 shadow-2xl dark:bg-slate-900" onClick={e => e.stopPropagation()}>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <b className="mr-auto">{zoom.label}</b>
+            <button className="btn-ghost" onClick={() => setZoom({ ...zoom, full: !zoom.full })}>{zoom.full ? "Show the book only" : "Show the full frame"}</button>
+            <button className="btn-ghost" onClick={() => setZoom(null)}>Close ✕</button>
+          </div>
+          <img src={zoom.full ? zoom.frame : zoom.crop} alt={zoom.label} className="mx-auto max-h-[78vh] max-w-full rounded object-contain" />
+        </div>
+      </div>}
     </div>
   );
 }

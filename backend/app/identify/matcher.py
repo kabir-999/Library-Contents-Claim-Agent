@@ -67,10 +67,13 @@ def score_candidate(ocr_text: str, ocr_conf: float, c: BookCandidate) -> Match:
     # Short/generic titles (<=1 content token) need an author hit, otherwise capped.
     reasons = []
     score = 0.62 * sim * (0.5 + 0.5 * coverage) + 0.28 * (1.0 if author_hit else 0.0) + 0.05 * (1.0 if publisher_hit else 0.0) + 0.05 * ocr_conf
-    if author_hit and coverage >= 0.75 and len(ct) >= 3:
-        score = max(score, 0.80)   # author found + most of a distinctive multi-word title found
+    if author_hit and coverage >= 0.66 and len(ct) >= 3:
+        score = max(score, 0.80)   # author found + most of a distinctive multi-word title found (competing works still make it 'ambiguous')
     if not author_hit and coverage >= 0.99 and len(ct) >= 4 and sim >= 0.9:
         score = max(score, 0.80); reasons.append("author not visible; long distinctive title matched exactly")
+    n_read = len([t for t in toks(ocr_text)])
+    if not author_hit and coverage >= 0.99 and len(ct) >= 2 and sim >= 0.97 and n_read <= len(ct) + 1 and sum(len(t) for t in ct) >= 9:
+        score = max(score, 0.80); reasons.append("read is exactly the title (no author visible)")   # e.g. 'FOURTH WING'
     if len(ct) <= 1 and not author_hit:
         score = min(score, 0.55); reasons.append("single-word title without author corroboration")
     if coverage < 0.6:
@@ -136,6 +139,10 @@ def decide(ocr_text: str, ocr_conf: float, cands: list[BookCandidate], conf_min:
         flags.append("multiple_books_in_view"); ambiguous = False
     else:
         runner_group = None
+    # The text names an author who belongs to a DIFFERENT work while the chosen title has no author support: a mixed read of two
+    # books (e.g. 'REBECCA YARROS WHO MOVED MY CHEESE?'). Never accept the title-only guess in that case.
+    if not top.author_hit and any(g[0].author_hit and g[0].coverage >= 0.4 for g in groups if g is not group) and not both_strong:
+        flags.append("mixed_reads"); ambiguous = True
     if top.score >= conf_min and not ambiguous:
         status = "identified"
     elif top.score >= 0.5:

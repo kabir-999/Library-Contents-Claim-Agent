@@ -80,7 +80,7 @@ def read_spine(img_bgr: np.ndarray, bbox, orientation: str = "upright") -> dict:
         return {"lines": [], "text": "", "conf": 0.0, "rotation": None, "available": False}
     H, W = img_bgr.shape[:2]
     x1, y1, x2, y2 = [int(v) for v in bbox]
-    pad = max(2, int(0.06 * (x2 - x1)))
+    pad = max(2, int(0.06 * min(x2 - x1, y2 - y1)))   # relative to the THIN side: a wide band must not reach into the next book
     crop = img_bgr[max(0, y1 - pad):min(H, y2 + pad), max(0, x1 - pad):min(W, x2 + pad)]
     if crop.size == 0:
         return {"lines": [], "text": "", "conf": 0.0, "rotation": None, "available": True}

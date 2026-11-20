@@ -97,6 +97,9 @@ async def run(session, notify: Optional[Callable[[str, str], Awaitable[None]]] =
         books_stage.detect_duplicates(session, book_tracks); books_stage.clean_books(book_tracks)   # fold dups/fragments FIRST: less to rescue
         budget = min(deadline, time.time() + 14.0)       # rescue + scene read are bounded: Stop -> packet must stay quick
         await asyncio.gather(books_stage.rescue_pass(session, book_tracks, budget), books_stage.scene_pass(session, book_tracks, budget))
+        await books_stage.resolve_conflicts(session, book_tracks)     # one title -> one physical book
+        books_stage.drop_containers(book_tracks)                      # a box covering a whole tower is not a book
+        state["moved_products"] = books_stage.move_products_to_items(session, book_tracks)   # product labels belong in Items, not Books
         merged = books_stage.detect_duplicates(session, book_tracks)  # sync, ms
         merged += [None] * books_stage.clean_books(book_tracks)
         timings.mark("duplicate_detection", 0.0, f"ok ({len(merged)} merged)")
@@ -127,6 +130,15 @@ async def run(session, notify: Optional[Callable[[str, str], Awaitable[None]]] =
         await _stage(timings, "nonbook_pricing", items_stage.price_items(session, state["items"], sem_net), _n, left())
 
     await asyncio.gather(books_group(), items_group())
+    if state.get("moved_products"):          # products that were first mistaken for books: classify + price them as items now
+        async def _safe(t):
+            try:
+                return await items_stage.classify_item(session, t)
+            except Exception:
+                log.exception("classification failed for moved product %s", t.tid); return None
+        extra = [i for i in await asyncio.gather(*(_safe(t) for t in state["moved_products"])) if i is not None]
+        await items_stage.price_items(session, extra, sem_net)
+        state["items"] += extra
 
     # room (needs shelf items' calibrated dims)
     shelved = [(i.dimensions_cm.w / 100, i.dimensions_cm.h / 100) for i in state["items"]

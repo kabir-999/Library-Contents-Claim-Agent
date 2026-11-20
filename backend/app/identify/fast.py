@@ -100,7 +100,7 @@ def _text_detector():
     return _TD["m"]
 
 
-def discover(frame_bgr: np.ndarray, max_boxes: int = 4) -> list[list[float]]:
+def discover(frame_bgr: np.ndarray, max_boxes: int = 12) -> list[list[float]]:
     """Text-driven book discovery for spines the box detectors miss (dark, tilted, held in a hand).
     PaddleOCR's text *detector* (no recognition, ~180 ms, handles tilt) finds text lines; elongated lines are
     clustered into spine/cover-shaped boxes. Candidates still go through the book gate like any detection."""
@@ -119,17 +119,38 @@ def discover(frame_bgr: np.ndarray, max_boxes: int = 4) -> list[list[float]]:
         if min(w, h) < 8 or max(w, h) < 40 or max(w, h) / max(1.0, min(w, h)) < 2.2:
             continue
         lines.append([x1, y1, x2, y2, h > w])
-    clusters: list[list] = []
-    for x1, y1, x2, y2, vert in sorted(lines, key=lambda l: -(l[2] - l[0]) * (l[3] - l[1])):
-        px, py = (0.9 * (x2 - x1), 60) if vert else (60, 0.9 * (y2 - y1))
-        for c in clusters:
-            if x1 - px <= c[2] and x2 + px >= c[0] and y1 - py <= c[3] and y2 + py >= c[1] and c[4] == vert:
-                c[0], c[1], c[2], c[3] = min(c[0], x1), min(c[1], y1), max(c[2], x2), max(c[3], y2); c[5] += 1; break
+    # Merge lines only when they belong to the SAME spine: for lying books (horizontal text) lines must share a horizontal band
+    # (vertical overlap), for standing books (vertical text) a vertical band. Adjacent bands of a stack stay separate books.
+    def same_spine(a, b) -> bool:
+        """Two text pieces belong to the same lying spine if they share a horizontal band (pieces of a title are often split into
+        'SARAH J. MAAS' / 'HOUSE OF' / 'FLAME AND SHADOW'); compared line-to-line, never against a growing union, so neighbouring
+        bands of a stack cannot chain together. Standing spines: shared x-range, close along y."""
+        ha, hb = a[3] - a[1], b[3] - b[1]
+        yov = min(a[3], b[3]) - max(a[1], b[1]); xgap = max(a[0], b[0]) - min(a[2], b[2])
+        if yov >= 0.6 * min(ha, hb) and xgap <= 120:
+            return True
+        if a[4] and b[4]:
+            xov = min(a[2], b[2]) - max(a[0], b[0]); ygap = max(a[1], b[1]) - min(a[3], b[3])
+            return xov >= 0.5 * min(a[2] - a[0], b[2] - b[0]) and ygap <= 150
+        return False
+    clusters: list[dict] = []
+    for ln in sorted(lines, key=lambda l: -(l[2] - l[0]) * (l[3] - l[1])):
+        hit = [c for c in clusters if any(same_spine(ln, m) for m in c["m"])]
+        if hit:                                   # a piece may bridge two clusters of the same band: merge them
+            c0 = hit[0]; c0["m"].append(ln)
+            for o in hit[1:]:
+                c0["m"] += o["m"]; clusters.remove(o)
         else:
-            clusters.append([x1, y1, x2, y2, vert, 1])
+            clusters.append({"m": [ln]})
+    cl = []
+    for c in clusters:
+        ms = c["m"]
+        cl.append([min(m[0] for m in ms), min(m[1] for m in ms), max(m[2] for m in ms), max(m[3] for m in ms),
+                   sum(m[4] for m in ms) > len(ms) / 2 and all(m[4] for m in ms), len(ms)])
+    clusters = cl
     out = []
     for x1, y1, x2, y2, vert, n in clusters[:max_boxes]:
         w, h = x2 - x1, y2 - y1
-        px, py = (max(0.6 * w, 10), 0.08 * h) if vert else (0.08 * w, max(0.6 * h, 10))
+        px, py = (max(0.6 * w, 10), 0.08 * h) if vert else (0.02 * w + 3, 0.14 * h + 2)   # lying spine: just the text line(s) of ONE spine, no neighbour's text
         out.append([max(0.0, x1 - px), max(0.0, y1 - py), min(float(W), x2 + px), min(float(H), y2 + py)])
     return out

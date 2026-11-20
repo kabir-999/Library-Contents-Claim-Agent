@@ -103,6 +103,7 @@ export default function StartClaim({ onStart }: { onStart: (r: StartResult) => v
           <li>Use headphones if you want to interrupt the agent while it’s speaking.</li>
         </ul>
       </div>
+      {health?.pricing_sources?.serper_status === "out_of_credits" && <div className="rounded border border-red-300 bg-red-50 p-2 text-sm text-red-800"><b>Serper is out of credits.</b> Google Shopping prices and the backup book lookup are off. Add credits or put a new <code>SERPER_API_KEY</code> in <code>.env</code> (serper.dev) and restart the backend. eBay prices still work.</div>}
       {health && <div className="text-xs text-slate-500">
         Backend: groq {health.llm.groq_configured ? "✓" : "✗"} · local LLM {health.llm.local_model} · eBay {health.pricing_sources.ebay ? "✓" : "✗"} · SerpAPI {health.pricing_sources.serpapi ? "✓" : "✗"} · TTS {health.tts}
         {Object.keys(health.models.errors).length > 0 && <div className="text-amber-600">Unavailable models: {Object.keys(health.models.errors).join(", ")}</div>}
