@@ -11,11 +11,12 @@ import cv2
 import numpy as np
 
 
-def split_run(img_bgr: np.ndarray, box, min_width_px: int = 9, max_aspect_for_single: float = 0.55) -> list[list[float]]:
+def split_run(img_bgr: np.ndarray, box, min_width_px: int = 9, max_aspect_for_single: float = 1.1) -> list[list[float]]:
     """Split a box containing several upright spines into per-spine boxes.
     Returns boxes in image coordinates. If nothing sensible, returns [box]."""
     x1, y1, x2, y2 = [int(round(v)) for v in box]
     w, h = x2 - x1, y2 - y1
+    min_width_px = max(min_width_px, int(0.05 * h))   # a spine is never thinner than ~5% of its height
     if w < 2 * min_width_px or h < 40:
         return [list(map(float, box))]
     # A single spine is much taller than wide; only try to split wide runs.
@@ -35,7 +36,7 @@ def split_run(img_bgr: np.ndarray, box, min_width_px: int = 9, max_aspect_for_si
     cdiff = cdiff / (cdiff.max() + 1e-6)
     score = 0.6 * (edge_prof / (edge_prof.max() + 1e-6)) + 0.4 * cdiff
     score = np.convolve(score, np.ones(3) / 3, mode="same")
-    thr = max(0.35, float(score.mean() + 1.0 * score.std()))
+    thr = max(0.40, float(score.mean() + 1.2 * score.std()))
     cuts = []
     for i in range(min_width_px, w - min_width_px):
         if score[i] >= thr and score[i] == score[max(0, i - min_width_px // 2): i + min_width_px // 2 + 1].max():
@@ -46,6 +47,9 @@ def split_run(img_bgr: np.ndarray, box, min_width_px: int = 9, max_aspect_for_si
     edges = [0] + cuts + [w]
     out = []
     for a, b in zip(edges[:-1], edges[1:]):
-        if b - a >= min_width_px:
+        if b - a >= min_width_px and (b - a) <= 1.1 * h:
             out.append([float(x1 + a), float(y1), float(x1 + b), float(y2)])
-    return out or [list(map(float, box))]
+    # a real run of spines gives >=3 narrow pieces; otherwise it's one book (e.g. a face-out cover): don't shred it
+    if len(out) < 3 or float(np.median([(b[2] - b[0]) / max(1.0, b[3] - b[1]) for b in out])) > 0.35:
+        return [list(map(float, box))]
+    return out

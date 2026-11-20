@@ -47,9 +47,17 @@ class LLMRouter:
     def groq_ok(self) -> bool:
         return bool(self.s.groq_api_key)
 
+    _local_down_until = 0.0
+
     @property
     def local_ok(self) -> bool:
-        return self.s.lca_local_llm_provider == "ollama"
+        import time
+        return self.s.lca_local_llm_provider == "ollama" and time.time() >= self._local_down_until
+
+    def _local_failed(self, e: Exception):
+        import time
+        if "connect" in str(e).lower():
+            self._local_down_until = time.time() + 600   # Ollama isn't running: stop retrying for 10 min
 
     async def _groq(self, system: str, user: str, json_mode: bool) -> str:
         body = {"model": self.s.lca_groq_model, "temperature": 0.0,
@@ -80,6 +88,7 @@ class LLMRouter:
                 return await (self._groq if name == "groq" else self._local)(system, user, json_mode)
             except Exception as e:
                 self.stats["fallbacks"] += 1
+                if name == "local": self._local_failed(e)
                 log.warning("LLM provider %s failed (%s); trying fallback", name, e)
         self.stats["failures"] += 1
         return None
@@ -99,7 +108,28 @@ class LLMRouter:
             self.stats["local_calls"] += 1
             return _parse_json(d["message"]["content"])
         except Exception as e:
+            self._local_failed(e)
             log.info("VLM unavailable: %s", e)
+            return None
+
+
+    async def groq_vision(self, image_jpeg: bytes, prompt: str) -> Optional[Any]:
+        """Groq-hosted VLM used as a second *reader* of printed text. Callers must corroborate its output."""
+        if not self.groq_ok:
+            return None
+        try:
+            b64 = base64.b64encode(image_jpeg).decode()
+            body = {"model": self.s.lca_groq_vlm_model, "temperature": 0.0,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]}
+            d = await request_json("POST", "https://api.groq.com/openai/v1/chat/completions",
+                                   headers={"Authorization": f"Bearer {self.s.groq_api_key}"}, json=body, timeout=30, retries=1)
+            self.stats["groq_calls"] += 1
+            self.stats["groq_tokens"] += int(d.get("usage", {}).get("total_tokens", 0))
+            return _parse_json(d["choices"][0]["message"]["content"])
+        except Exception as e:
+            log.info("Groq VLM unavailable: %s", e)
             return None
 
 

@@ -41,15 +41,24 @@ def _isbns(ids: list[dict]) -> tuple[str, str]:
     return i13, i10
 
 
+_google_blocked_until = 0.0   # circuit breaker: keyless Google Books 429s constantly; stop hammering it
+
+
 async def google_books(query: str, max_results: int = 8) -> list[BookCandidate]:
+    global _google_blocked_until
+    import time
     s = get_settings()
+    if time.time() < _google_blocked_until or not s.google_books_api_key:
+        return []   # keyless Google Books is rate-limited to uselessness; Open Library is used unless a key is configured
     params = {"q": query, "maxResults": max_results, "printType": "books"}
     if s.google_books_api_key:
         params["key"] = s.google_books_api_key
     bump("google_books_calls")
     try:
-        d = await request_json("GET", "https://www.googleapis.com/books/v1/volumes", params=params)
-    except Exception:
+        d = await request_json("GET", "https://www.googleapis.com/books/v1/volumes", params=params, retries=0)
+    except Exception as e:
+        if "429" in str(e):
+            _google_blocked_until = time.time() + 300
         return []
     out = []
     for it in d.get("items", []) or []:
@@ -67,7 +76,8 @@ async def open_library(query: str, limit: int = 8) -> list[BookCandidate]:
     try:
         d = await request_json("GET", "https://openlibrary.org/search.json", params={
             "q": query, "limit": limit,
-            "fields": "key,title,subtitle,author_name,publisher,first_publish_year,isbn,edition_count,language"})
+            "fields": "key,title,subtitle,author_name,publisher,first_publish_year,isbn,edition_count,language"},
+            timeout=5, retries=1)
     except Exception:
         return []
     out = []
@@ -93,3 +103,15 @@ async def by_isbn(isbn: str) -> list[BookCandidate]:
     isbn = re.sub(r"[^0-9Xx]", "", isbn)
     g, o = await asyncio.gather(google_books(f"isbn:{isbn}", 3), open_library(f"isbn:{isbn}", 3))
     return g + o
+
+
+_AUTHOR_CACHE: dict[str, list] = {}
+
+
+async def works_by_author(author: str, limit: int = 80) -> list[BookCandidate]:
+    """All of an author's catalogued works (Open Library): lets a garbled title ('BC MURDERS') be fuzzy-matched
+    against the author's real titles ('The A.B.C. Murders')."""
+    k = author.lower().strip()
+    if k not in _AUTHOR_CACHE:
+        _AUTHOR_CACHE[k] = await open_library(f'author:"{author}"', limit) if k else []
+    return _AUTHOR_CACHE[k]

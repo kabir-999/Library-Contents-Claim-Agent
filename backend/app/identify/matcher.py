@@ -54,14 +54,23 @@ def score_candidate(ocr_text: str, ocr_conf: float, c: BookCandidate) -> Match:
     if not ct or not o:
         return Match(c, 0, 0, False, False, 0)
     coverage = sum(1 for t in ct if any(t == x or fuzz.ratio(t, x) >= 85 for x in ot)) / len(ct)
-    sim = max(fuzz.partial_ratio(norm(main_title(c.title)), o) / 100, fuzz.token_set_ratio(norm(main_title(c.title)), o) / 100 * coverage)
+    sq_t, sq_o = norm(main_title(c.title)).replace(' ', ''), o.replace(' ', '')
+    sq = fuzz.partial_ratio(sq_t, sq_o) / 100 if len(sq_t) >= 6 else 0.0   # 'A.B.C. Murders' vs OCR 'BC MURDERS'
+    sim = max(sq * 0.97, fuzz.partial_ratio(norm(main_title(c.title)), o) / 100, fuzz.token_set_ratio(norm(main_title(c.title)), o) / 100 * coverage)
     surnames = [toks(a)[-1] for a in c.authors if toks(a)]
     author_hit = any(any(s == x or fuzz.ratio(s, x) >= 88 for x in ot) for s in surnames)
+    if not author_hit:   # OCR often glues/garbles the author line ("AgalleChristic"): fuzzy-search the surname in the unspaced text
+        flat = o.replace(" ", "")
+        author_hit = any(len(s) >= 5 and fuzz.partial_ratio(s, flat) >= 85 for s in surnames)
     pub = toks(c.publisher)
     publisher_hit = bool(pub) and any(any(p == x for x in ot) for p in pub[:2])
     # Short/generic titles (<=1 content token) need an author hit, otherwise capped.
     reasons = []
     score = 0.62 * sim * (0.5 + 0.5 * coverage) + 0.28 * (1.0 if author_hit else 0.0) + 0.05 * (1.0 if publisher_hit else 0.0) + 0.05 * ocr_conf
+    if author_hit and coverage >= 0.75 and len(ct) >= 3:
+        score = max(score, 0.80)   # author found + most of a distinctive multi-word title found
+    if not author_hit and coverage >= 0.99 and len(ct) >= 4 and sim >= 0.9:
+        score = max(score, 0.80); reasons.append("author not visible; long distinctive title matched exactly")
     if len(ct) <= 1 and not author_hit:
         score = min(score, 0.55); reasons.append("single-word title without author corroboration")
     if coverage < 0.6:
@@ -81,7 +90,10 @@ def group_works(matches: list[Match]) -> list[list[Match]]:
     for m in matches:
         for g in groups:
             g0 = g[0].cand
-            if fuzz.token_set_ratio(norm(main_title(g0.title)), norm(main_title(m.cand.title))) >= 92 and \
+            a_t, b_t = norm(main_title(g0.title)), norm(main_title(m.cand.title))
+            if a_t == b_t:   # same title = same work, whatever the author field says ("Christie, Agatha", adaptations, ...)
+                g.append(m); break
+            if (fuzz.token_set_ratio(a_t, b_t) >= 92 or (min(len(a_t), len(b_t)) >= 8 and (a_t in b_t or b_t in a_t))) and \
                (not g0.authors or not m.cand.authors or fuzz.token_set_ratio(norm(g0.authors[0]), norm(m.cand.authors[0])) >= 80):
                 g.append(m); break
         else:
@@ -115,13 +127,22 @@ def decide(ocr_text: str, ocr_conf: float, cands: list[BookCandidate], conf_min:
         flags.append("multiple_editions")
     if SIGNED_RE.search(ocr_text): flags.append("signed")
     if FIRST_ED_RE.search(ocr_text): flags.append("first_edition_claimed")
+    runner = other_works[0] if other_works else None
+    runner_group = next((g for g in groups if g[0] is runner), None) if runner else None
+    both_strong = bool(runner) and all(m.score >= conf_min and m.author_hit and m.coverage >= 0.75 for m in (top, runner))
+    if both_strong:
+        # tilted/overlapping spines: one crop legitimately contains two different books. Report both (the second is
+        # registered by the caller as its own entry), not an ambiguity.
+        flags.append("multiple_books_in_view"); ambiguous = False
+    else:
+        runner_group = None
     if top.score >= conf_min and not ambiguous:
         status = "identified"
     elif top.score >= 0.5:
         status = "needs_review"
     else:
         status = "partial"
-    return {"status": status, "confidence": top.score, "flags": flags, "chosen": top, "group": group,
+    return {"status": status, "confidence": top.score, "flags": flags, "chosen": top, "group": group, "runner_group": runner_group,
             "edition": ed, "ambiguous": ambiguous, "alternatives": [m.cand.to_dict() for m in ms[:4]],
             "verification": {"title_sim": top.title_sim, "author_hit": top.author_hit, "publisher_hit": top.publisher_hit,
                              "coverage": top.coverage, "sources": sorted({m.cand.source for m in group})}}
@@ -146,3 +167,12 @@ def pick_isbn(group: list[Match], publisher_text: str = "", ocr_text: str = "") 
     o = set(toks(ocr_text))
     hits = {m.cand.isbn13 for m in group if m.cand.isbn13 and toks(m.cand.publisher) and toks(m.cand.publisher)[0] in o}
     return next(iter(hits)) if len(hits) == 1 else ""
+
+
+def work_key(title: str) -> str:
+    """Same book, different catalogue string: 'And Then There Were None (adaptation)' == 'And Then There Were None';
+    'The A.B.C. Murders' == 'The ABC Murders'."""
+    t = re.sub(r"[\(\[].*?[\)\]]", " ", title or "")
+    t = re.split(r"\s*[:–—]\s", t, 1)[0]
+    t = re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode().lower())
+    return t[3:] if t.startswith("the") and len(t) > 8 else t

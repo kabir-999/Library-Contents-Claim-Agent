@@ -7,6 +7,7 @@ unusually valuable books are flagged for human appraisal and NOT priced.
 from __future__ import annotations
 
 import logging
+import asyncio
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -45,7 +46,8 @@ async def _shopping(query: str, country: str) -> list[dict]:
     key = (query, country)
     if key not in _shop_cache:
         import asyncio as _a
-        batches = await _a.gather(*(providers.serp_shopping(f"{query} {suffix}".strip(), country) for suffix in ("book", "paperback", "used book")))
+        suffixes = ("book", "paperback buy online", "used book") if market(country).get("no_fx") else ("book", "used book")
+        batches = await _a.gather(*(providers.serp_shopping(f"{query} {suffix}".strip(), country) for suffix in suffixes))
         seen, rows = set(), []
         for r in (x for b in batches for x in b):
             if r["url"] not in seen:
@@ -76,7 +78,21 @@ def available_sources() -> dict:
     return {"ebay": providers.ebay_enabled(), "serper": bool(s.serper_api_key), "serpapi": bool(s.serpapi_api_key)}
 
 
-async def price_book(*, title: str, author: str, isbn: str, group_isbns: list[tuple[str, str]], country: str,
+_CACHE: dict = {}
+
+
+async def price_book(**kw) -> dict:
+    """Cached wrapper: live (during sweep) and final pricing share one lookup per book."""
+    key = (kw.get("isbn") or "", kw["title"].lower(), kw["author"].lower(), kw["country"], bool(kw.get("allow_foreign_fallback")))
+    if key in _CACHE:
+        return _CACHE[key]
+    r = await _price_book(**kw)
+    if r["replacement"].amount is not None or r["used"].amount is not None:   # never cache a failed/empty lookup
+        _CACHE[key] = r
+    return r
+
+
+async def _price_book(*, title: str, author: str, isbn: str, group_isbns: list[tuple[str, str]], country: str,
                      currency: str, allow_foreign_fallback: bool = False, home_market: str = "US") -> dict:
     """group_isbns: [(isbn13, year)] of matched editions. Returns dict with replacement/used/notes."""
     s = get_settings()
@@ -101,13 +117,17 @@ async def price_book(*, title: str, author: str, isbn: str, group_isbns: list[tu
         return [l for l in ls if l["currency"] == expect_cur], ls
 
     mk = market(country)
-    new_local, _ = await run("NEW", country, currency)
-    used_local, _ = await run("USED", country, currency)
+    allow_foreign_fallback = allow_foreign_fallback and not mk.get("no_fx")   # India: no USD->INR conversion, ever
+    cross = allow_foreign_fallback and mk["code"] != home_market
+    hm0 = market(home_market)
+    # all lookups in parallel: latency = the slowest one, not their sum
+    (new_local, _), (used_local, _), home_res = await asyncio.gather(
+        run("NEW", country, currency), run("USED", country, currency),
+        run("NEW", home_market, hm0["currency"]) if cross else asyncio.sleep(0, result=([], [])))
 
     c = central(new_local)
     if c and allow_foreign_fallback and mk["code"] != home_market:
-        hm0 = market(home_market)
-        ref = central((await run("NEW", home_market, hm0["currency"]))[0])
+        ref = central(home_res[0])
         conv0 = await fx.convert(ref["amount"], hm0["currency"], currency) if ref else None
         if conv0 and c["amount"] > 3 * conv0["amount"]:
             note += (f" Local price {c['amount']:g} {currency} withheld: >3x the converted {hm0['code']} reference "
@@ -122,8 +142,7 @@ async def price_book(*, title: str, author: str, isbn: str, group_isbns: list[tu
                               currency=currency, condition_assumed="new")
     elif allow_foreign_fallback and mk["code"] != home_market:
         hm = market(home_market)
-        foreign, _ = await run("NEW", home_market, hm["currency"])
-        c = central(foreign)
+        c = central(home_res[0])
         if c:
             conv = await fx.convert(c["amount"], hm["currency"], currency)
             if conv:
@@ -133,6 +152,9 @@ async def price_book(*, title: str, author: str, isbn: str, group_isbns: list[tu
                                       original_amount=c["amount"], original_currency=hm["currency"], fx_rate=conv["rate"],
                                       fx_source=conv["source"] + (f" {conv['rate_date']}" if conv["rate_date"] else ""))
     cu = central(used_local)
+    if cu and rep.amount and cu["amount"] > 3 * rep.amount:
+        note += f" Used price {cu['amount']:g} {currency} withheld: >3x the new price ({rep.amount:g}); likely a collectible/different edition."
+        cu = None
     if cu and cu["n"] < s.lca_min_listings:
         note += f" Used value withheld: only {cu['n']} matching listing(s) (need {s.lca_min_listings})."
         cu = None
@@ -143,5 +165,9 @@ async def price_book(*, title: str, author: str, isbn: str, group_isbns: list[tu
                          currency=currency, listings_used=cu["n"])
         pass
     # Unusually valuable => human appraisal, never auto-priced
-    over = [v for v in (rep.amount, used.amount) if v is not None and v > s.lca_appraisal_price_threshold]
-    return {"replacement": rep, "used": used, "priced_isbn": priced_isbn, "note": note.strip(), "over_threshold": bool(over)}
+    thr = s.lca_appraisal_price_threshold   # configured in USD; compare in the claim currency
+    if currency != "USD":
+        conv = await fx.convert(thr, "USD", currency)
+        thr = conv["amount"] if conv else thr * {"INR": 83, "GBP": 0.8, "EUR": 0.93}.get(currency, 1)
+    over = [v for v in (rep.amount, used.amount) if v is not None and v > thr]
+    return {"threshold_local": round(thr, 2), "currency": currency, "replacement": rep, "used": used, "priced_isbn": priced_isbn, "note": note.strip(), "over_threshold": bool(over)}

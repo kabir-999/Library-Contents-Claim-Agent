@@ -24,10 +24,17 @@ class Settings(BaseSettings):
     lca_local_vlm_model: str = "qwen2.5vl:7b"
     groq_api_key: str = ""
     lca_groq_model: str = "openai/gpt-oss-120b"
+    lca_groq_vlm_model: str = "qwen/qwen3.8-27b"
 
     lca_yolo_object_weights: str = "yolov8s.pt"
     lca_yolo_spine_weights: str = ""
     lca_ocr_enabled: bool = True
+    lca_live_processing: bool = False  # False (default): record during the sweep, process ALL frames in batch after Stop
+    lca_batch_max_frames: int = 200   # analysed frames per sweep (evenly thinned beyond this); raise on faster hardware
+    lca_live_preview: bool = True    # while recording: ~1 frame/s light analysis for on-screen inventory + spoken guidance (final packet still comes from the batch pass)
+    lca_edge_profile: bool = False  # small-model profile for low-power hosts: YOLOv8-nano + PaddleOCR mobile det/rec
+    lca_fast_detect: bool = True  # live: one full-frame pass only (tiles + open-vocab pass are for offline/recall)
+    lca_book_gate: bool = True    # CLIP book/not-book gate (disable only in stubbed tests)
     lca_book_conf: float = 0.05   # low on purpose: recall first; tracker hits + OCR/metadata verification filter false positives
 
     lca_whisper_model: str = "base.en"

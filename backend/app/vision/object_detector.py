@@ -76,6 +76,20 @@ class ObjectDetector:
         if m is None:
             return []
         res = m.predict(img_bgr, imgsz=960, conf=conf, verbose=False, device=device())[0]
+        return self._parse(img_bgr, res)
+
+    def detect_batch(self, imgs: list, conf: float = 0.25, chunk: int = 16) -> list[list[dict]]:
+        m = self._model()
+        if m is None:
+            return [[] for _ in imgs]
+        out = []
+        for i in range(0, len(imgs), chunk):
+            part = imgs[i:i + chunk]
+            res = m.predict(part, imgsz=960, conf=conf, verbose=False, device=device(), batch=len(part))
+            out += [self._parse(im, r) for im, r in zip(part, res)]
+        return out
+
+    def _parse(self, img_bgr, res) -> list[dict]:
         names = res.names
         out = []
         for b in res.boxes:
@@ -90,4 +104,26 @@ class ObjectDetector:
             if crop.size == 0 or float(crop.std()) < 12.0:   # blank wall / uniform patch: not an object
                 continue
             out.append({"bbox": [x1, y1, x2, y2], "conf": float(b.conf[0]), "label": name, "category": cat})
-        return out
+        return _merge_same_category(out)
+
+
+
+
+def _merge_same_category(dets: list[dict]) -> list[dict]:
+    """One physical object must be one detection per frame: 'lamp' + 'floor lamp' boxes on the same lamp collapse."""
+    dets = sorted(dets, key=lambda d: -d["conf"])
+    kept: list[dict] = []
+    for d in dets:
+        a = d["bbox"]
+        dup = False
+        for k in kept:
+            if k["category"] != d["category"]:
+                continue
+            b = k["bbox"]
+            ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+            small = max(1.0, min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])))
+            if ix * iy / small > 0.6:
+                dup = True; break
+        if not dup:
+            kept.append(d)
+    return kept

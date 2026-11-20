@@ -108,6 +108,14 @@ class Storage:
             rows = self._con.execute("SELECT id, ts, rel_ts, w, h, quality, keep FROM frames WHERE sweep_id=? ORDER BY ts", (sweep_id,)).fetchall()
         return [dict(r) for r in rows]
 
+    def frames_full(self, sweep_id: str) -> list[dict]:
+        with self._lock:
+            rows = self._con.execute("SELECT id, ts, rel_ts, path, w, h, quality, orient FROM frames WHERE sweep_id=? ORDER BY ts", (sweep_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r); d["orient"] = json.loads(d["orient"] or "{}") or None; out.append(d)
+        return out
+
     def prune_frames(self, sweep_id: str, keep_every_s: float = 5.0) -> int:
         """Delete non-evidence frames, retaining a sparse timeline (one per `keep_every_s`)."""
         with self._lock:

@@ -16,6 +16,7 @@ pytest-asyncio>=0.23
 
 # Vision (heavy). The app degrades gracefully if any of these are missing.
 ultralytics>=8.3
+clip @ git+https://github.com/ultralytics/CLIP.git   # book/not-book gate + YOLO-World text encoder (needs git)
 paddlepaddle>=3.0
 paddleocr>=3.0
 
@@ -23,3 +24,4 @@ paddleocr>=3.0
 faster-whisper>=1.0
 kokoro>=0.9   # optional TTS; browser speechSynthesis is the fallback
 soundfile>=0.12
+pytesseract>=0.3.10

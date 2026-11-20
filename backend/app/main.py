@@ -33,12 +33,20 @@ s = get_settings()
 logging.basicConfig(level=s.lca_log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("lca")
 app = FastAPI(title="Library Contents Claim Agent")
+@app.on_event("startup")
+async def _warm_models():
+    from .vision import gate
+    gate.warm()   # background: book/not-book classifier; the live loop never waits for it
+
+
 @app.exception_handler(ValueError)
 async def _value_error(_, exc: ValueError):
     return JSONResponse({"detail": str(exc)}, status_code=404 if "sweep id" in str(exc) else 422)
 
 
-app.add_middleware(CORSMiddleware, allow_origins=s.cors_list, allow_methods=["*"], allow_headers=["*"])
+# localhost plus private-LAN origins, so a phone on the same Wi-Fi can use the app
+_LAN = r"https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?"
+app.add_middleware(CORSMiddleware, allow_origins=s.cors_list, allow_origin_regex=_LAN, allow_methods=["*"], allow_headers=["*"])
 
 
 class StartClaim(BaseModel):
@@ -46,6 +54,7 @@ class StartClaim(BaseModel):
     currency: str = Field(default="", max_length=3)
     device: str = Field(default="", max_length=200)
     camera_height_cm: Optional[float] = Field(default=None, gt=30, lt=250)
+    live: bool = False   # True: live inventory during the sweep (heavier). False: record, then analyse everything after Stop
 
 
 def _packet(sweep_id: str) -> ClaimPacket:
@@ -74,7 +83,7 @@ async def start_claim(b: StartClaim):
     if not currency:
         raise HTTPException(422, "currency required for unknown country")
     sid = "sw_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-    storage().create_sweep(sid, mk["code"], currency, b.device, {"camera_height_cm": b.camera_height_cm})
+    storage().create_sweep(sid, mk["code"], currency, b.device, {"camera_height_cm": b.camera_height_cm, "live": b.live})
     return {"sweep_id": sid, "country": mk["code"], "currency": currency}
 
 
@@ -221,6 +230,7 @@ async def ws(websocket: WebSocket, sid: str):
     sess = live.SESSIONS.get(sid)
     if sess is None:
         sess = SweepSession(sid, row["country"], row["currency"], row["device"], row["meta"].get("camera_height_cm"))
+        sess.batch_mode = not row["meta"].get("live", False)
         live.SESSIONS[sid] = sess
     agent = live.LiveAgent(websocket, sess)
     await agent.run()

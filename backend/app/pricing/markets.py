@@ -12,7 +12,7 @@ MARKETS = {
     "ES": {"name": "Spain", "currency": "EUR", "ebay": "EBAY_ES", "gl": "es"},
     "IE": {"name": "Ireland", "currency": "EUR", "ebay": "EBAY_IE", "gl": "ie"},
     "NL": {"name": "Netherlands", "currency": "EUR", "ebay": "EBAY_NL", "gl": "nl"},
-    "IN": {"name": "India", "currency": "INR", "ebay": None, "gl": "in"},
+    "IN": {"name": "India", "currency": "INR", "ebay": None, "gl": "in", "no_fx": True},   # local retailers only (Google Shopping, gl=in); never converted from USD
     "SG": {"name": "Singapore", "currency": "SGD", "ebay": "EBAY_SG", "gl": "sg"},
     "NZ": {"name": "New Zealand", "currency": "NZD", "ebay": None, "gl": "nz"},
     "AE": {"name": "United Arab Emirates", "currency": "AED", "ebay": None, "gl": "ae"},

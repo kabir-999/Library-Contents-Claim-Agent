@@ -1,7 +1,7 @@
 # Development status
 
 ## Verified (automated, this machine)
-* `cd backend && source .venv/bin/activate && python -m pytest` → **75 passed**: claim totals/exclusion rules, schema round-trip, calibration (A4 homography, two-point, cross-frame scale transfer), room geometry (rectangle, L-shape, ceiling/wall area), matcher anti-hallucination rules, price aggregation/filtering, guidance rules, correction grammar, tracking across a synthetic pan, storage, evaluation-scoring logic, and a **stubbed end-to-end pipeline** (detectors/OCR/APIs faked) that produces a schema-valid packet + PDF with every `frame_ref` resolving.
+* `cd backend && source .venv/bin/activate && python -m pytest` → **81 passed**: claim totals/exclusion rules, schema round-trip, calibration (A4 homography, two-point, cross-frame scale transfer), room geometry (rectangle, L-shape, ceiling/wall area), matcher anti-hallucination rules, price aggregation/filtering, guidance rules, correction grammar, tracking across a synthetic pan, storage, evaluation-scoring logic, and a **stubbed end-to-end pipeline** (detectors/OCR/APIs faked) that produces a schema-valid packet + PDF with every `frame_ref` resolving.
 * `npx tsc --noEmit` and `npx next build` pass.
 * Live smoke test: backend started, a sweep created, synthetic frames sent over the WebSocket, `stop` → packet + PDF produced via the real code path. YOLO (COCO weights) loads and runs on Apple MPS.
 
@@ -10,6 +10,14 @@
 * Pricing "The Remains of the Day": US new 12.35 USD / used 19.0 USD (3 listings); GB new converted from US; IN unreliable (see below).
 * Bugs found by these live runs and fixed: UK `gl` code (`uk` -> `gb`; `uk` silently returned USD results), bare `$` mislabelled as local currency, essays/study guides passing as book listings (now: title must lead the listing, essay words + Grin/Hausarbeiten blocked), ISBN queries for unverified editions returning unrelated books, single-listing prices (now need >=2).
 * Limits found: Serper `link` is a Google Shopping page, not the retailer's own page; Google Books returns 429 without `GOOGLE_BOOKS_API_KEY` (Open Library covers); Ollama not running; India book prices still unreliable (one 5,324 INR result for a ~400 INR book) -> spot-check against the links.
+
+## Changed since (2026-11-20)
+Record-then-analyse by default (`LCA_LIVE_PROCESSING=false`; start-screen checkbox switches live inventory on), batch frame analysis (`pipeline/batch.py`),
+CLIP book gate, Tesseract fast reader + PaddleOCR text-line discovery, vision-model scene read (budgeted), author-first catalogue filtering, `work_key` de-duplication,
+India priced from local sources only (no FX), Stop releases camera/mic. Status of the sections below is otherwise unchanged: **no pass bar has been measured**,
+no >=60-book room has been captured, no demo video/packet/ground-truth sheet exists yet.
+
+**Update:** the default run now records every frame (~6-7/s) AND shows a light live preview (~1 frame/s: on-screen inventory, spoken guidance and narration, the original-or-print question); the packet still comes only from the batch pass after Stop, and the agent speaks a final summary. The remaining blockers are physical: real capture, ground truth, demo video (see `docs/capture_and_eval_checklist.md`).
 
 ## NOT verified (do not assume these work)
 * **Accuracy on a real room: nothing measured.** No books were photographed, so detection/OCR/identification/measurement/pricing accuracy are unknown. The pass-bar table is unfilled (`docs/evaluation.md`).

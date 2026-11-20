@@ -73,8 +73,17 @@ async def run(session, notify: Optional[Callable[[str, str], Awaitable[None]]] =
         if notify:
             await notify(stage, status)
 
+    session.finalizing = True   # end-of-sweep pass: larger model allowance, per-item
     await session.stop_worker()
     session.ended_at = session.ended_at or time.time()
+    if session.batch_mode and not session.books.tracks and not session.objs.tracks:
+        from . import batch
+        tb = time.time()
+        await session.emit("processing", stage="frame_analysis", status="starting")
+        async def _p(pct): await session.emit("processing", stage="frame_analysis", status=f"{pct}%")
+        st = await batch.replay(session, _p)
+        timings.mark("frame_analysis", time.time() - tb, f"ok ({st['kept']} of {st['total']} frames analysed)")
+        await session.emit("processing", stage="frame_analysis", status="ok")
     session.snapshot_tracks()
     sem_net = asyncio.Semaphore(6)
     left = lambda: max(5.0, deadline - time.time())
@@ -85,7 +94,11 @@ async def run(session, notify: Optional[Callable[[str, str], Awaitable[None]]] =
 
     async def books_group():
         await _stage(timings, "book_identification", books_stage.finish_identification(session, book_tracks, deadline), _n, left())
+        books_stage.detect_duplicates(session, book_tracks); books_stage.clean_books(book_tracks)   # fold dups/fragments FIRST: less to rescue
+        budget = min(deadline, time.time() + 14.0)       # rescue + scene read are bounded: Stop -> packet must stay quick
+        await asyncio.gather(books_stage.rescue_pass(session, book_tracks, budget), books_stage.scene_pass(session, book_tracks, budget))
         merged = books_stage.detect_duplicates(session, book_tracks)  # sync, ms
+        merged += [None] * books_stage.clean_books(book_tracks)
         timings.mark("duplicate_detection", 0.0, f"ok ({len(merged)} merged)")
         live = [t for t in book_tracks if not t.removed]
         state["shelf_of"] = assign_shelves(live)
@@ -108,7 +121,8 @@ async def run(session, notify: Optional[Callable[[str, str], Awaitable[None]]] =
             except Exception:
                 log.exception("classification failed for %s", t.tid)
                 return None
-        its = await _stage(timings, "nonbook_classification", asyncio.gather(*(safe(t) for t in obj_tracks)), _n, left())
+        books_stage.clean_items(obj_tracks, book_tracks)
+        its = await _stage(timings, "nonbook_classification", asyncio.gather(*(safe(t) for t in obj_tracks if not t.removed)), _n, left())
         state["items"] = [i for i in (its or []) if i is not None]
         await _stage(timings, "nonbook_pricing", items_stage.price_items(session, state["items"], sem_net), _n, left())
 
@@ -177,7 +191,7 @@ async def run(session, notify: Optional[Callable[[str, str], Awaitable[None]]] =
              f"{len(packet.items)} other items found." if packet.items else "",
              f"Floor area {packet.room.floor_area_m2} square metres." if packet.room.floor_area_m2 is not None else "Room dimensions were not measurable from this sweep.",
              f"{len([r for r in packet.review_queue if not r.resolved])} entries need your review."]
-    await session.emit("agent_say", text=" ".join(p for p in parts if p), speech_kind="reply", audio_wav_b64=None)
+    await session.emit("agent_say", text=" ".join(p for p in parts if p), speech_kind="reply", speak=True, final=True, audio_wav_b64=None)
     await session.emit("packet_ready", sweep_id=sid, seconds=gt)
     return packet
 

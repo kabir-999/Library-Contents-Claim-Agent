@@ -1,11 +1,13 @@
 import type { Packet } from "./types";
-export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Same host as the page, port 8000: works on localhost AND from a phone opening https://<mac-ip>:3000
+export const API = process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:8000` : "http://localhost:8000");
 export const WS = API.replace(/^http/, "ws");
 async function j<T>(r: Response): Promise<T> { if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.json(); }
 export const api = {
   health: () => fetch(`${API}/api/health`).then(j<any>),
   markets: () => fetch(`${API}/api/markets`).then(j<{ code: string; name: string; currency: string }[]>),
-  start: (b: { country: string; currency: string; device: string; camera_height_cm?: number | null }) =>
+  start: (b: { country: string; currency: string; device: string; camera_height_cm?: number | null; live?: boolean }) =>
     fetch(`${API}/api/sweeps`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }).then(j<{ sweep_id: string; country: string; currency: string }>),
   packet: (id: string) => fetch(`${API}/api/sweeps/${id}/packet`).then(j<Packet>),
   events: (id: string, after = 0) => fetch(`${API}/api/sweeps/${id}/events?after=${after}`).then(j<any[]>),
