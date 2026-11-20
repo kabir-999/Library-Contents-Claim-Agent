@@ -8,3 +8,4 @@ data/lca.sqlite3*
 data/sweeps/*
 !data/sweeps/.gitkeep
 certs/
+data/
